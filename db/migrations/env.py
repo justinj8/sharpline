@@ -13,7 +13,7 @@ from sqlalchemy import create_engine
 
 import sharpline.db.models  # noqa: F401  (registers every table on Base.metadata)
 from sharpline.config import get_settings
-from sharpline.db.base import Base
+from sharpline.db.base import Base, include_object
 from sharpline.db.session import normalize_database_url
 
 config = context.config
@@ -29,7 +29,12 @@ def _url() -> str:
 
 
 def run_migrations_offline() -> None:
-    context.configure(url=_url(), target_metadata=target_metadata, literal_binds=True)
+    context.configure(
+        url=_url(),
+        target_metadata=target_metadata,
+        include_object=include_object,
+        literal_binds=True,
+    )
     with context.begin_transaction():
         context.run_migrations()
 
@@ -37,7 +42,11 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     engine = create_engine(_url())
     with engine.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            include_object=include_object,
+        )
         with context.begin_transaction():
             context.run_migrations()
     engine.dispose()
