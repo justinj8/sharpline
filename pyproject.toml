@@ -67,6 +67,7 @@ packages = ["sharpline", "sharpline_api", "sharpline_worker"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["integration: needs a Postgres reachable via TEST_DATABASE_URL"]
+addopts = "--import-mode=importlib"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 filterwarnings = [
