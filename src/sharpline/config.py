@@ -17,7 +17,8 @@ Environment = Literal["local", "test", "staging", "production"]
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)
 
-    database_url: str
+    # Contains the DB password: keep it out of repr()/str() and therefore out of logs.
+    database_url: str = Field(repr=False)
     # Read from SHARPLINE_ENV (a bare ENV variable is too generic to trust).
     env: Environment = Field(default="local", validation_alias=AliasChoices("SHARPLINE_ENV", "env"))
     log_level: str = "INFO"

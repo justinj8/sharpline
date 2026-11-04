@@ -1,0 +1,8 @@
+{
+  "name": "sharpline-railway-iac",
+  "private": true,
+  "description": "Railway infrastructure-as-code for Sharpline (evaluated by `railway config plan/apply`)",
+  "devDependencies": {
+    "railway": "3.16.0"
+  }
+}
