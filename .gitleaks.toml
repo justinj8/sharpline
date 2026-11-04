@@ -1,0 +1,8 @@
+title = "sharpline gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Template files contain only empty placeholders"
+paths = ['''\.env\.example$''']

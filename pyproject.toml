@@ -1,0 +1,69 @@
+[project]
+name = "sharpline"
+version = "0.1.0"
+description = "Multi-sport agentic forecasting platform: core library"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "sqlalchemy>=2.0.35",
+    "psycopg[binary]>=3.2",
+    "alembic>=1.13",
+    "structlog>=24.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sharpline"]
+
+[tool.uv.workspace]
+members = ["apps/api", "apps/worker"]
+
+[tool.uv.sources]
+sharpline-api = { workspace = true }
+sharpline-worker = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "sharpline-api",
+    "sharpline-worker",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "testcontainers[postgres]>=4.8",
+    "httpx>=0.27",
+    "mypy>=1.13",
+    "ruff>=0.7",
+    "pre-commit>=4.0",
+    "python-dotenv>=1.2.4",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["db/migrations/script.py.mako", "docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["sharpline", "sharpline_api", "sharpline_worker"]
+
+[tool.mypy]
+strict = true
+plugins = ["pydantic.mypy"]
+mypy_path = ["src", "apps/api/src", "apps/worker/src"]
+packages = ["sharpline", "sharpline_api", "sharpline_worker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: needs a Postgres reachable via TEST_DATABASE_URL"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    # Starlette nudges toward an httpx successor; keep the established httpx until vetted.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]

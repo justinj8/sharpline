@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets and local state
+.env
+.env.*
+!.env.example
+
+# Agent scratch
+.superpowers/
+
+# Frontend (Phase 4)
+node_modules/
+.next/
+
+# OS
+.DS_Store
