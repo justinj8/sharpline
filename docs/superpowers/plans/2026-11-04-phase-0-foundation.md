@@ -17,7 +17,7 @@ Postgres 16 + pgvector is the only stateful service; Alembic owns all DDL, inclu
 ## Global Constraints
 
 - Python `>=3.12,<3.13`; dependency management with uv only (no pip/requirements.txt).
-- Postgres 16 with the `vector` extension: Railway Postgres (pgvector) in `dev` and `production` environments; CI uses a `pgvector/pgvector:pg16` GitHub Actions service container. No Docker is required on the developer machine.
+- Postgres 16 with the `vector` extension: Railway Postgres (pgvector) in `dev` and `production` environments; CI uses a `pgvector/pgvector:pg18` GitHub Actions service container. No Docker is required on the developer machine.
 - Integration tests read `TEST_DATABASE_URL` (an admin URL on the Railway dev Postgres); when it is unset they are skipped with a clear reason, so `make test.unit` works offline.
 - All timestamps are `timestamptz` in the DB and timezone-aware UTC in Python; naive datetimes are rejected.
 - Secrets come only from environment variables; no key, token or password is ever committed. gitleaks runs in pre-commit and CI.
@@ -282,7 +282,7 @@ Creates billable cloud resources. The executor must get the owner's explicit OK 
 
 **Interfaces:**
 - Produces:
-  - Railway project `sharpline` with environment `dev` containing one Postgres service built from the pgvector image `pgvector/pgvector:pg16` (Railway pgvector template), with a public TCP proxy.
+  - Railway project `sharpline` with environment `dev` containing one Postgres service built from the pgvector image `pgvector/pgvector:pg18` (Railway pgvector template), with a public TCP proxy.
   - Local `.env` with `DATABASE_URL` = the dev Postgres public URL (database `railway`) and `TEST_DATABASE_URL` = the same server and admin user (the test fixture creates its own databases there).
   - The `production` environment is created in Task 9.
 
@@ -503,7 +503,7 @@ def test_procrastinate_tables_exist(db_session):
 - Produces: workflow `ci` on `push` to `main` and on `pull_request`, with jobs:
   - `lint`: `ruff check` and `ruff format --check`.
   - `typecheck`: `mypy`.
-  - `test`: `pytest -v` with a `services.postgres` container (`pgvector/pgvector:pg16`, `POSTGRES_PASSWORD=postgres`, health-checked with `pg_isready`) and `TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres`, so integration tests run in CI without Docker on any developer machine.
+  - `test`: `pytest -v` with a `services.postgres` container (`pgvector/pgvector:pg18`, `POSTGRES_PASSWORD=postgres`, health-checked with `pg_isready`) and `TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres`, so integration tests run in CI without Docker on any developer machine.
   - `secrets`: `gitleaks/gitleaks-action@v2` with full history checkout.
   - `build`: `uv sync --frozen --no-dev --all-packages`, mirroring the Railpack install step.
   - All Python jobs use `astral-sh/setup-uv` with caching and `uv sync --all-packages --frozen`.
