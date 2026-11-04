@@ -848,7 +848,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "procrastinate", specifier = ">=2.14" },
+    { name = "procrastinate", specifier = "==3.10.0" },
     { name = "sharpline", editable = "." },
 ]
 

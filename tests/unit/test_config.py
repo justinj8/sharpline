@@ -35,6 +35,14 @@ def test_settings_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "super-secret-value" not in repr(s)
 
 
+def test_database_password_not_in_repr(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://railway:hunter2-db-pass@host:5432/railway")
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert "hunter2-db-pass" not in repr(s)
+    assert "hunter2-db-pass" not in str(s)
+    assert s.database_url.endswith("@host:5432/railway")
+
+
 def test_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgres://u:p@h/d")
     s = Settings(_env_file=None)  # type: ignore[call-arg]
