@@ -1,0 +1,408 @@
+{
+ "timestamp": "2026-11-04T21:19:00Z",
+ "status": "success",
+ "season": {
+  "year": 2027,
+  "type": 2,
+  "name": "Regular Season",
+  "displayName": "2026-27"
+ },
+ "injuries": [
+  {
+   "id": "1",
+   "displayName": "Atlanta Hawks",
+   "injuries": [
+    {
+     "id": "537471",
+     "longComment": "Landale is sidelined for a second consecutive game with the injury. Zuby Ejiofor should handle the No. 2 center spot for as long as Landale is on the shelf.",
+     "shortComment": "Landale is out for Wednesday's game against the Wizards with a left hip strain, Kevin Chouinard of the Hawks' official site reports.",
+     "status": "Out",
+     "date": "2026-11-03T22:08Z",
+     "athlete": {
+      "firstName": "Jock",
+      "lastName": "Landale",
+      "displayName": "Jock Landale",
+      "shortName": "J. Landale",
+      "position": {
+       "id": "9",
+       "name": "Center",
+       "displayName": "Center",
+       "abbreviation": "C",
+       "leaf": false
+      },
+      "team": {
+       "id": "1",
+       "uid": "s:40~l:46~t:1",
+       "slug": "atlanta-hawks",
+       "name": "Hawks",
+       "abbreviation": "ATL",
+       "displayName": "Atlanta Hawks"
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "4",
+      "name": "INJURY_STATUS_OUT",
+      "description": "out",
+      "abbreviation": "O"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "OUT",
+       "abbreviation": "OUT"
+      },
+      "type": "Hip",
+      "location": "Torso",
+      "side": "Left",
+      "returnDate": "2026-11-06"
+     }
+    },
+    {
+     "id": "537470",
+     "longComment": "Johnson suffered a sprained left ankle in Saturday's 121-99 loss to New Orleans and was ruled out ahead of Monday's meeting with the Pacers. If Johnson can't get back on the floor Wednesday versus the Wizards, Luguentz Dort might make his second consecutive start.",
+     "shortComment": "Johnson (ankle) is listed as questionable for Wednesday's game in Washington, Kevin Chouinard of the Hawks' official site reports.",
+     "status": "Day-To-Day",
+     "date": "2026-11-03T22:06Z",
+     "athlete": {
+      "firstName": "Jalen",
+      "lastName": "Johnson",
+      "displayName": "Jalen Johnson",
+      "shortName": "J. Johnson",
+      "position": {
+       "id": "7",
+       "name": "Forward",
+       "displayName": "Forward",
+       "abbreviation": "F",
+       "leaf": false
+      },
+      "team": {
+       "id": "1",
+       "uid": "s:40~l:46~t:1",
+       "slug": "atlanta-hawks",
+       "name": "Hawks",
+       "abbreviation": "ATL",
+       "displayName": "Atlanta Hawks"
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "6",
+      "name": "INJURY_STATUS_DAYTODAY",
+      "description": "day-to-day",
+      "abbreviation": "DD"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "GTD",
+       "abbreviation": "GTD"
+      },
+      "type": "Ankle",
+      "location": "Leg",
+      "side": "Left",
+      "returnDate": "2026-11-04"
+     }
+    },
+    {
+     "id": "-58751",
+     "longComment": "Gueye will be re-evaluated by medical staff in 3-to-4 months, which means he'll miss all of training camp and preseason and likely the start of the 2026-27 regular season. It's a brutal blow for the fourth-year big man, given that the Hawks used the No. 23 overall pick of the 2026 NBA Draft to select St. John's product Zuby Ejiofor. Gueye's absence means Ejiofor will have more opportunities in the preseason, and the rookie could establish a key role off the bench behind Onyeka Okongwu and projected backup center Jock Landale (ankle).",
+     "shortComment": "Gueye underwent surgery Tuesday to repair a fractured left foot that he suffered during a workout last week, Brad Rowland of the Locked On Podcast Network reports.",
+     "status": "Out",
+     "date": "2026-10-19T19:38Z",
+     "athlete": {
+      "firstName": "Mouhamed",
+      "lastName": "Gueye",
+      "displayName": "Mouhamed Gueye",
+      "shortName": "M. Gueye",
+      "position": {
+       "id": "7",
+       "name": "Forward",
+       "displayName": "Forward",
+       "abbreviation": "F",
+       "leaf": false
+      },
+      "team": {
+       "id": "1",
+       "uid": "s:40~l:46~t:1",
+       "slug": "atlanta-hawks",
+       "name": "Hawks",
+       "abbreviation": "ATL",
+       "displayName": "Atlanta Hawks"
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "4",
+      "name": "INJURY_STATUS_OUT",
+      "description": "out",
+      "abbreviation": "O"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "OUT",
+       "abbreviation": "OUT"
+      },
+      "type": "Foot",
+      "location": "Leg",
+      "detail": "Fracture",
+      "side": "Left",
+      "returnDate": "2026-11-20"
+     }
+    },
+    {
+     "id": "-57577",
+     "longComment": "Veesaar suffered the injury during a workout on Sept. 15, and an MRI confirmed the diagnosis. The No. 52 overall pick in the 2026 NBA Draft, Veesaar was expected to spend a lot of time with Atlanta's G League affiliate this season.",
+     "shortComment": "Veesaar was diagnosed with a torn right ACL and is expected to miss the 2026-27 season, the Hawks announced Monday.",
+     "status": "Out",
+     "date": "2026-09-21T19:50Z",
+     "athlete": {
+      "firstName": "Henri",
+      "lastName": "Veesaar",
+      "displayName": "Henri Veesaar",
+      "shortName": "H. Veesaar",
+      "position": {
+       "id": "9",
+       "name": "Center",
+       "displayName": "Center",
+       "abbreviation": "C",
+       "leaf": false
+      },
+      "team": {
+       "id": "1",
+       "uid": "s:40~l:46~t:1",
+       "slug": "atlanta-hawks",
+       "name": "Hawks",
+       "abbreviation": "ATL",
+       "displayName": "Atlanta Hawks"
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "4",
+      "name": "INJURY_STATUS_OUT",
+      "description": "out",
+      "abbreviation": "O"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "OFS",
+       "abbreviation": "OFS"
+      },
+      "type": "Knee",
+      "location": "Leg",
+      "side": "Right",
+      "returnDate": "2027-07-01"
+     }
+    }
+   ]
+  },
+  {
+   "id": "2",
+   "displayName": "Boston Celtics",
+   "injuries": [
+    {
+     "id": "537518",
+     "longComment": "The writing was on the wall for this one with the Celtics looking to get Tatum some planned rest. There's been no report of an injury, to be clear. Paul George, who is coming off a maintenance day himself, is in line for a big bump in usage Wednesday.",
+     "shortComment": "Tatum will be rested Wednesday against the Bucks, Jack Simone of BostonSportsJournal.com reports.",
+     "status": "Out",
+     "date": "2026-11-04T17:48Z",
+     "athlete": {
+      "firstName": "Jayson",
+      "lastName": "Tatum",
+      "displayName": "Jayson Tatum",
+      "shortName": "J. Tatum",
+      "position": {
+       "id": "7",
+       "name": "Forward",
+       "displayName": "Forward",
+       "abbreviation": "F",
+       "leaf": false
+      },
+      "team": {
+       "id": "2",
+       "uid": "s:40~l:46~t:2",
+       "slug": "boston-celtics",
+       "name": "Celtics",
+       "abbreviation": "BOS",
+       "displayName": "Boston Celtics"
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "4",
+      "name": "INJURY_STATUS_OUT",
+      "description": "out",
+      "abbreviation": "O"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "OUT",
+       "abbreviation": "OUT"
+      },
+      "type": "Rest",
+      "location": "Other",
+      "returnDate": "2026-11-06"
+     }
+    },
+    {
+     "id": "537463",
+     "longComment": "Pritchard's status is uncertain after he struggled in Monday's loss to Houston, finishing with four points on 0-for-7 shooting across 30 minutes. With Jayson Tatum (rest) also questionable and Devin Carter (illness) ruled out, Boston could be shorthanded Wednesday. Pritchard's availability should become clearer closer to tipoff.",
+     "shortComment": "Pritchard is listed as questionable for Wednesday's game against Milwaukee due to a right shoulder contusion, Taylor Snow of the Celtics' official site reports.",
+     "status": "Day-To-Day",
+     "date": "2026-11-03T21:12Z",
+     "athlete": {
+      "firstName": "Payton",
+      "lastName": "Pritchard",
+      "displayName": "Payton Pritchard",
+      "shortName": "P. Pritchard",
+      "position": {
+       "id": "3",
+       "name": "Guard",
+       "displayName": "Guard",
+       "abbreviation": "G",
+       "leaf": false
+      },
+      "team": {
+       "id": "2",
+       "uid": "s:40~l:46~t:2",
+       "slug": "boston-celtics",
+       "name": "Celtics",
+       "abbreviation": "BOS",
+       "displayName": "Boston Celtics"
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "6",
+      "name": "INJURY_STATUS_DAYTODAY",
+      "description": "day-to-day",
+      "abbreviation": "DD"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "GTD",
+       "abbreviation": "GTD"
+      },
+      "type": "Shoulder",
+      "location": "Arm",
+      "side": "Right",
+      "returnDate": "2026-11-04"
+     }
+    },
+    {
+     "id": "535118",
+     "longComment": "Carter missed Boston's final three preseason games with the illness and is now expected to miss time to begin the regular season. He can be considered week-to-week until Boston provides an update on his progress. The 2024 first-rounder signed a two-way pact with the Celtics on Saturday and will provide backcourt depth for the club.",
+     "shortComment": "Carter has been diagnosed with mononucleosis and is without a timetable for a return, Gary Washburn of The Boston Globe reports.",
+     "status": "Out",
+     "date": "2026-10-18T14:49Z",
+     "athlete": {
+      "firstName": "Devin",
+      "lastName": "Carter",
+      "displayName": "Devin Carter",
+      "shortName": "D. Carter",
+      "position": {
+       "id": "3",
+       "name": "Guard",
+       "displayName": "Guard",
+       "abbreviation": "G",
+       "leaf": false
+      },
+      "team": {
+       "id": "2",
+       "uid": "s:40~l:46~t:2",
+       "slug": "boston-celtics",
+       "name": "Celtics",
+       "abbreviation": "BOS",
+       "displayName": "Boston Celtics"
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "4",
+      "name": "INJURY_STATUS_OUT",
+      "description": "out",
+      "abbreviation": "O"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "OUT",
+       "abbreviation": "OUT"
+      },
+      "type": "Illness",
+      "location": "Other",
+      "returnDate": "2026-11-08"
+     }
+    }
+   ]
+  }
+ ]
+}
