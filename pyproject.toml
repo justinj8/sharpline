@@ -63,3 +63,7 @@ testpaths = ["tests"]
 markers = ["integration: needs a Postgres reachable via TEST_DATABASE_URL"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    # Starlette nudges toward an httpx successor; keep the established httpx until vetted.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
