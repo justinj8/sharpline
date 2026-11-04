@@ -7,7 +7,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from sharpline.db.base import Base
+from sharpline.db.base import Base, include_object
 from sharpline.db.models import Market, OddsSnapshot
 
 pytestmark = pytest.mark.integration
@@ -35,9 +35,10 @@ def test_vector_extension_installed(db_session: Session) -> None:
 
 def test_models_match_migrations(db_session: Session) -> None:
     """The hand-written migration and the ORM models must describe the same schema."""
-    ctx = MigrationContext.configure(db_session.connection())
-    diffs = [d for d in compare_metadata(ctx, Base.metadata) if d[0] != "remove_table"]
-    assert diffs == []
+    ctx = MigrationContext.configure(
+        db_session.connection(), opts={"include_object": include_object}
+    )
+    assert compare_metadata(ctx, Base.metadata) == []
 
 
 def test_odds_price_check_rejects_invalid(

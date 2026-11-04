@@ -23,3 +23,21 @@ def in_values(column: str, values: Iterable[StrEnum | str]) -> str:
     """SQL for a CHECK constraint restricting a text column to a closed vocabulary."""
     quoted = ", ".join(f"'{v}'" for v in values)
     return f"{column} IN ({quoted})"
+
+
+EXTERNALLY_MANAGED_PREFIX = "procrastinate_"
+
+
+def include_object(
+    obj: object, name: str | None, type_: str, reflected: bool, compare_to: object
+) -> bool:
+    """Alembic autogenerate filter: ignore schema objects owned by procrastinate.
+
+    Its tables come from the vendored SQL in migration 0002, not from our models, so
+    autogenerate must neither diff nor propose dropping them.
+    """
+    if type_ == "table":
+        return not (name or "").startswith(EXTERNALLY_MANAGED_PREFIX)
+    table = getattr(obj, "table", None)
+    table_name = getattr(table, "name", "") or ""
+    return not table_name.startswith(EXTERNALLY_MANAGED_PREFIX)
