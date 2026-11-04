@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 from sqlalchemy import Engine, create_engine, make_url, text
 from sqlalchemy.orm import Session
 
-from sharpline.db.models import Event, Market, Team
+from sharpline.db.models import Event, Market, Player, Team
 from sharpline.db.session import normalize_database_url
 from sharpline.db.sources import record_source
 
@@ -122,3 +122,11 @@ def seeded_market(db_session: Session) -> int:
     db_session.add(market)
     db_session.flush()
     return market.id
+
+
+@pytest.fixture
+def seeded_player(db_session: Session) -> int:
+    player = Player(sport="nba", full_name="Jayson Tatum")
+    db_session.add(player)
+    db_session.flush()
+    return player.id
