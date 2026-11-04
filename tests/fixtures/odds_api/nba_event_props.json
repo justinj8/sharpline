@@ -1,0 +1,60 @@
+{
+  "id": "evt1",
+  "sport_key": "basketball_nba",
+  "sport_title": "NBA",
+  "commence_time": "2026-11-05T00:00:00Z",
+  "home_team": "Boston Celtics",
+  "away_team": "New York Knicks",
+  "bookmakers": [
+    {
+      "key": "draftkings",
+      "title": "DraftKings",
+      "last_update": "2026-11-04T18:00:00Z",
+      "markets": [
+        {
+          "key": "player_points",
+          "last_update": "2026-11-04T18:00:00Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "price": -115,
+              "description": "Jayson Tatum",
+              "point": 27.5
+            },
+            {
+              "name": "Under",
+              "price": -105,
+              "description": "Jayson Tatum",
+              "point": 27.5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "fanduel",
+      "title": "FanDuel",
+      "last_update": "2026-11-04T18:00:00Z",
+      "markets": [
+        {
+          "key": "player_points",
+          "last_update": "2026-11-04T18:00:00Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "price": 100,
+              "description": "Jayson Tatum",
+              "point": 28.5
+            },
+            {
+              "name": "Under",
+              "price": -120,
+              "description": "Jayson Tatum",
+              "point": 28.5
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
