@@ -36,7 +36,6 @@ class SourceObservation(Base):
 
     __tablename__ = "source_observations"
     __table_args__ = (
-        Index(None, "source_id"),
         CheckConstraint(
             "purpose IS NULL OR " + in_values("purpose", OBSERVATION_PURPOSES), name="purpose"
         ),
@@ -46,6 +45,13 @@ class SourceObservation(Base):
     source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"))
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     purpose: Mapped[str | None] = mapped_column(Text)
+
+
+Index(
+    "ix_source_observations_lookup",
+    SourceObservation.source_id,
+    SourceObservation.observed_at.desc(),
+)
 
 
 class Injury(Base):

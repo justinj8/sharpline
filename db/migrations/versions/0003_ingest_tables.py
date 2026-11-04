@@ -107,7 +107,10 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id", name=op.f("pk_source_observations")),
     )
     op.create_index(
-        op.f("ix_source_observations_source_id"), "source_observations", ["source_id"], unique=False
+        "ix_source_observations_lookup",
+        "source_observations",
+        ["source_id", sa.literal_column("observed_at DESC")],
+        unique=False,
     )
     op.create_table(
         "injuries",
@@ -186,7 +189,7 @@ def downgrade() -> None:
     op.drop_table("player_game_stats")
     op.drop_index(op.f("ix_injuries_player_id"), table_name="injuries")
     op.drop_table("injuries")
-    op.drop_index(op.f("ix_source_observations_source_id"), table_name="source_observations")
+    op.drop_index("ix_source_observations_lookup", table_name="source_observations")
     op.drop_table("source_observations")
     op.drop_index(op.f("ix_quota_ledger_provider"), table_name="quota_ledger")
     op.drop_table("quota_ledger")
