@@ -1,0 +1,91 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UV_FROZEN: "1"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --all-packages --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --all-packages --frozen
+      - run: uv run mypy
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      # Same major version and extension as the Railway Postgres (18 + pgvector).
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Integration tests create and drop their own sharpline_test_* database here.
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      SHARPLINE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --all-packages --frozen
+      - run: uv run pytest -v
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    # Mirrors the Railpack install step: a production-only sync must resolve from the lockfile.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen --no-dev --all-packages
+      - run: uv run --no-sync python -c "import sharpline_api.app, sharpline_worker.app"

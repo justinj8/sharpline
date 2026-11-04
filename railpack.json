@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "provider": "python",
+  "packages": { "python": "3.12" },
+  "steps": {
+    "install": {
+      "commands": [
+        "pip install uv",
+        "uv sync --frozen --no-dev --all-packages"
+      ]
+    },
+    "build": {
+      "inputs": [{ "step": "install" }],
+      "commands": ["echo 'venv built in the install step so it ships in the image; nothing to build'"]
+    }
+  }
+}
