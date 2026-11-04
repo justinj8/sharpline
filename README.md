@@ -1,5 +1,7 @@
 # Sharpline
 
+[![ci](https://github.com/justinj8/sharpline/actions/workflows/ci.yml/badge.svg)](https://github.com/justinj8/sharpline/actions/workflows/ci.yml)
+
 A multi-sport (NBA, NFL, MLB) agentic forecasting platform. One LangGraph pipeline
 (research → model → picks) with a module per sport, task-based model routing
 (Haiku ingests, Sonnet analyzes, Opus writes the final card), a grounding gate that
@@ -7,7 +9,8 @@ drops any pick whose odds, injury or projection claims cannot be traced to a fet
 source, and a calibration layer scored by Brier score and closing line value. Every
 run's cost is recorded.
 
-> Status: **Phase 0 — Foundation.** See `docs/superpowers/specs/` for the design and
+> Status: **Phase 0 — Foundation, deployed.** Live health check:
+> <https://api-production-e3800.up.railway.app/v1/health>. See `docs/superpowers/specs/` for the design and
 > `docs/superpowers/plans/` for phase plans. All tracking is paper tracking for
 > research; nothing here is betting advice.
 
@@ -33,11 +36,33 @@ Get the values from the Railway dashboard (Postgres service → Variables:
 `RAILWAY_TCP_PROXY_DOMAIN`, `RAILWAY_TCP_PROXY_PORT`, `PGUSER`, `POSTGRES_PASSWORD`,
 `PGDATABASE`). Never commit `.env`.
 
+## Deployment
+
+Production runs on Railway. `.railway/railway.ts` (Railway infrastructure-as-code) defines
+the whole `production` environment: Postgres 18 with pgvector, the `api` service and the
+`worker` service. Both services build from `main` with Railpack (`railpack.json`).
+
+```bash
+railway environment production
+railway config plan        # read-only preview of infrastructure changes
+railway config apply       # apply after reviewing the plan
+```
+
+- **api** runs `alembic upgrade head` as a pre-deploy step and is health-checked on `/v1/health`.
+- **worker** runs procrastinate and logs a `worker.heartbeat` every 5 minutes.
+- **Secrets:** the services reference `DATABASE_URL` from the Postgres service; no secret
+  values are in the repo.
+- The `dev` environment (local development and integration tests) is deliberately *not*
+  managed by the file, which refuses to plan against it.
+
+![architecture](docs/assets/architecture.png)
+
 ## Layout
 
 ```
 apps/api/        FastAPI service (sharpline_api)
 apps/worker/     procrastinate scheduler/worker (sharpline_worker)
+.railway/        Railway infrastructure-as-code (production)
 src/sharpline/   core library: config, domain, db
 db/migrations/   Alembic migrations
 tests/           unit (no I/O) and integration (TEST_DATABASE_URL)

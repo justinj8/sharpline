@@ -5,7 +5,7 @@ description = "Sharpline scheduler and job worker"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "sharpline",
-    "procrastinate>=2.14",
+    "procrastinate==3.10.0",  # must match db/migrations/sql/procrastinate_3.10.0_schema.sql
 ]
 
 [build-system]
