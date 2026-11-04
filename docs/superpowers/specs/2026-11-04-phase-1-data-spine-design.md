@@ -87,7 +87,7 @@ re-fetching.
 
 | Table | Columns (beyond `id`) | Notes |
 |---|---|---|
-| `source_observations` | `source_id → sources`, `observed_at` | one row per fetch, including deduplicated ones; index (`source_id`, `observed_at desc`) |
+| `source_observations` | `source_id → sources`, `observed_at`, `purpose` (`closing` or NULL) | one row per fetch, including deduplicated ones; index (`source_id`, `observed_at desc`); `purpose` lets reparse restore `is_closing` after a bundle load |
 | `injuries` | `player_id → players`, `event_id → events null`, `status`, `detail`, `reported_at`, `source_id` | status ∈ `out`, `doubtful`, `questionable`, `probable`, `active` |
 | `results` | `event_id → events` (unique), `home_score`, `away_score`, `final_at`, `source_id` | |
 | `player_game_stats` | `event_id`, `player_id`, `stats jsonb`, `source_id` | unique (`event_id`, `player_id`); stat keys use the `stat` vocabulary from `markets.py` |
