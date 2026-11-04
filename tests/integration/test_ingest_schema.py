@@ -41,3 +41,10 @@ def test_injury_status_check(db_session: Session, seeded_source: int, seeded_pla
     )
     with pytest.raises(IntegrityError):
         db_session.flush()
+
+
+def test_source_observations_lookup_index_is_descending(db_session: Session) -> None:
+    indexdef = db_session.execute(
+        text("select indexdef from pg_indexes where indexname = 'ix_source_observations_lookup'")
+    ).scalar_one()
+    assert "source_id, observed_at DESC" in indexdef
