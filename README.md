@@ -24,6 +24,15 @@ make dev                      # run the API on :8000
 curl localhost:8000/v1/health
 ```
 
+### Railway dev database
+
+The `sharpline` Railway project has a `dev` environment with Postgres 18 (pgvector) exposed
+through a TCP proxy. `.env` holds its public URL as both `DATABASE_URL` and
+`TEST_DATABASE_URL`; integration tests create and drop `sharpline_test_*` databases on it.
+Get the values from the Railway dashboard (Postgres service → Variables:
+`RAILWAY_TCP_PROXY_DOMAIN`, `RAILWAY_TCP_PROXY_PORT`, `PGUSER`, `POSTGRES_PASSWORD`,
+`PGDATABASE`). Never commit `.env`.
+
 ## Layout
 
 ```
