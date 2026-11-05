@@ -5,6 +5,7 @@ The resolver never commits; it flushes as needed and callers own the transaction
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
@@ -56,7 +57,10 @@ class EntityResolver:
         *,
         sport: Sport,
         team_id: int | None,
+        prefer_team_ids: Collection[int] = (),
     ) -> Resolution:
+        """`team_id` restricts name matches to that team; `prefer_team_ids` only breaks ties
+        (a unique match among those teams wins, else the sport-wide match is used)."""
         entity_id = self._xref(provider, "player", provider_id)
         if entity_id is not None:
             return Resolved(entity_id)
@@ -65,11 +69,13 @@ class EntityResolver:
         players = self._session.execute(
             select(Player.id, Player.full_name, Player.team_id).where(Player.sport == sport)
         ).all()
-        exact = [
-            p.id
+        same_name = [
+            p
             for p in players
             if normalize_name(p.full_name) == target and (team_id is None or p.team_id == team_id)
         ]
+        preferred = [p for p in same_name if p.team_id in prefer_team_ids]
+        exact = [p.id for p in (preferred if len(preferred) == 1 else same_name)]
         if len(exact) == 1:
             self._add_xref("player", exact[0], provider, provider_id)
             return Resolved(exact[0])
