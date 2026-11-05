@@ -7,8 +7,8 @@ from typing import Any
 import httpx
 import pytest
 from pydantic import SecretStr
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import Engine, func, select
+from sqlalchemy.orm import Session, sessionmaker
 
 from sharpline.db.models import (
     EntityReview,
@@ -200,3 +200,43 @@ def test_parser_error_still_records_the_fetch(
     assert _count(db_session, SourceObservation) == 1
     assert _count(db_session, QuotaLedger) == 1
     assert _count(db_session, Event) == 0  # the write step rolled back as a unit
+
+
+@pytest.mark.usefixtures("teams")
+def test_closing_fetch_with_an_unchanged_payload_still_writes_closing_snapshots(
+    db_session: Session,
+) -> None:
+    db_session.add(Player(sport="nba", full_name="Jayson Tatum", team_id=_team(db_session, "BOS")))
+    db_session.flush()
+    client = _odds("nba_event_props.json")
+    ingest_props(db_session, client, "evt1", ["player_points"])
+    ingest_props(db_session, client, "evt1", ["player_points"], is_closing=True)
+
+    assert _count(db_session, Source) == 1  # identical payload: one source, two observations
+    purposes = db_session.scalars(select(SourceObservation.purpose)).all()
+    assert set(purposes) == {"closing", None} and len(purposes) == 2
+    flags = db_session.scalars(select(OddsSnapshot.is_closing)).all()
+    assert flags.count(True) == flags.count(False) == 4
+
+
+def test_idle_session_commits_the_fetch_before_a_failing_write(
+    private_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production path: a plain session, no outer transaction, real commits."""
+
+    def broken(*_args: Any, **_kwargs: Any) -> Any:
+        raise ValueError("parser bug")
+
+    monkeypatch.setattr("sharpline.ingest.jobs.parse_odds", broken)
+    sessions = sessionmaker(bind=private_engine)
+    with sessions() as session:
+        assert not session.in_transaction()
+        with pytest.raises(ValueError, match="parser bug"):
+            ingest_game_lines(session, _odds("nba_game_odds.json"))
+        session.rollback()  # anything left uncommitted is discarded here
+
+    with sessions() as fresh:  # a new session on a new connection sees committed rows only
+        assert _count(fresh, Source) == 1
+        assert _count(fresh, SourceObservation) == 1
+        assert _count(fresh, QuotaLedger) == 1
+        assert _count(fresh, Event) == 0

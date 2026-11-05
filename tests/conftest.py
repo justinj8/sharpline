@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -40,12 +41,9 @@ def _alembic_config(url: str) -> Config:
     return cfg
 
 
-@pytest.fixture(scope="session")
-def pg_url() -> Iterator[str]:
-    admin_url = os.environ.get("TEST_DATABASE_URL")
-    if not admin_url:
-        pytest.skip("TEST_DATABASE_URL not set")
-
+@contextmanager
+def _throwaway_database(admin_url: str) -> Iterator[str]:
+    """Create a uniquely named database, migrate it to head, yield its URL, drop it."""
     name = f"sharpline_test_{uuid.uuid4().hex[:8]}"
     admin = create_engine(normalize_database_url(admin_url), isolation_level="AUTOCOMMIT")
     with admin.connect() as conn:
@@ -63,6 +61,31 @@ def pg_url() -> Iterator[str]:
         with admin.connect() as conn:
             conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
         admin.dispose()
+
+
+def _admin_url() -> str:
+    admin_url = os.environ.get("TEST_DATABASE_URL")
+    if not admin_url:
+        pytest.skip("TEST_DATABASE_URL not set")
+    return admin_url
+
+
+@pytest.fixture(scope="session")
+def pg_url() -> Iterator[str]:
+    with _throwaway_database(_admin_url()) as url:
+        yield url
+
+
+@pytest.fixture
+def private_engine() -> Iterator[Engine]:
+    """A private migrated database for tests that must really commit (dropped afterwards),
+    so their committed rows never reach the shared per-run test database."""
+    with _throwaway_database(_admin_url()) as url:
+        eng = create_engine(url)
+        try:
+            yield eng
+        finally:
+            eng.dispose()
 
 
 @pytest.fixture(scope="session")

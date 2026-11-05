@@ -1,14 +1,20 @@
-"""Ingest jobs: fetch -> record_fetch (committed) -> parse + write (second transaction).
+"""Ingest jobs: fetch -> record_fetch (unit 1) -> parse + write (unit 2).
 
-The fetch happens before any transaction opens, so none is held across network I/O.
-The fetch is recorded (source, observation, quota row) in its own unit first, so a parser
-or writer failure leaves the raw payload in place for a later reparse (spec section 7).
+The fetch is recorded (source, observation, quota row) in its own unit before parsing,
+so a parser or writer failure leaves the raw payload in place for a later reparse
+(spec section 7).
 
 Error contract (all jobs): exceptions propagate. A fetch error records nothing. A
-parse/write error rolls back only that job's typed rows, and the recorded fetch stays.
+parse/write error rolls back only unit 2 (that job's typed rows).
 
-Units: on a session with no open transaction, each unit commits; on a session already
-inside a transaction, each unit is a savepoint and the caller commits.
+Transaction modes, decided by the session the caller passes in:
+- Idle session (production: nothing open): each unit is its own transaction and commits
+  on exit. The fetch runs before either unit opens, so no transaction is held across
+  network I/O, and the recorded fetch is durable even when unit 2 fails.
+- Session already inside a transaction: each unit is a savepoint in the caller's
+  transaction, which stays open across the fetch. Nothing is durable until the caller
+  commits. The caller must commit (not roll back) after a failed job to keep the
+  recorded fetch, since rolling back the outer transaction discards unit 1 too.
 """
 
 from __future__ import annotations
