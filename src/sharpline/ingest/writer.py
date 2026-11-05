@@ -34,6 +34,7 @@ from sharpline.sports.nba.season import season_start_year
 
 EASTERN = ZoneInfo("America/New_York")
 EVENT_MATCH_WINDOW = timedelta(hours=2)
+TIP_MOVE_THRESHOLD = timedelta(minutes=10)
 
 
 @dataclass(frozen=True)
@@ -95,13 +96,14 @@ class Writer:
             event_id = self._xref(row.provider, "event", row.provider_event_id)
             if event_id is not None:
                 event = self._s.get_one(Event, event_id)
-                if event.commence_time != row.commence_time:
-                    event.commence_time = row.commence_time  # tip moved
             else:
                 event = self._match_event(row, home.entity_id, away.entity_id) or self._new_event(
                     row, home.entity_id, away.entity_id
                 )
                 self._add_xref("event", event.id, row.provider, row.provider_event_id)
+            # R9: providers disagree by minutes; only a real reschedule moves the tip.
+            if abs(event.commence_time - row.commence_time) > TIP_MOVE_THRESHOLD:
+                event.commence_time = row.commence_time
             tally.written += 1
         self._s.flush()
         return tally.stats()
@@ -139,11 +141,13 @@ class Writer:
         tally = _Tally()
         events: dict[str, Event | None] = {}
         players: dict[tuple[int, str], Resolution] = {}
+        # A closing fetch can return a payload identical to an earlier fetch (same source):
+        # its closing snapshots are distinct rows, so is_closing is part of the identity.
         seen = {
             tuple(r)
             for r in self._s.execute(
                 select(OddsSnapshot.market_id, OddsSnapshot.book, OddsSnapshot.side).where(
-                    OddsSnapshot.source_id == source_id
+                    OddsSnapshot.source_id == source_id, OddsSnapshot.is_closing == is_closing
                 )
             )
         }
@@ -265,7 +269,8 @@ class Writer:
         return tally.stats()
 
     def results(self, rows: Iterable[ResultRow], source_id: int) -> WriteStats:
-        """final_at is when we first saw the final (R4): it may move earlier, never later."""
+        """final_at is when we first saw the final (R4): it may move earlier, never later.
+        Scores follow the newest source by fetched_at, whatever order sources are written in."""
         source = self._source(source_id)
         tally = _Tally()
         for row in rows:
@@ -286,9 +291,10 @@ class Writer:
                     )
                 )
             else:
-                if final_at < result.final_at:
-                    result.final_at, result.source_id = final_at, source_id
-                if (result.home_score, result.away_score) != (row.home_score, row.away_score):
+                result.final_at = min(result.final_at, final_at)
+                # Scores (and source_id, their provenance) come from the newest observation,
+                # so reparsing an older source never reverts a correction.
+                if source.fetched_at >= self._source(result.source_id).fetched_at:
                     result.home_score, result.away_score = row.home_score, row.away_score
                     result.source_id = source_id
             self._s.get_one(Event, event_id).status = "final"
