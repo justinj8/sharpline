@@ -1,5 +1,5 @@
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect, select
 from sqlalchemy.orm import Session
 
 from sharpline.db.models import EntityReview, EntityXref, Player, Team
@@ -151,3 +151,23 @@ def test_resolve_review_writes_xref(db_session: Session) -> None:
     assert resolver.player(
         "espn", "123", "Marcus Morris", sport=Sport.NBA, team_id=None
     ) == Resolved(a.id)
+
+
+def test_review_upsert_refreshes_only_that_review(db_session: Session) -> None:
+    morris = _player(db_session, "Marcus Morris")
+    _player(db_session, "Marcus Morris Sr.")
+    resolver = EntityResolver(db_session)
+    first = resolver.player("espn", "123", "Marcus Morris", sport=Sport.NBA, team_id=None)
+    assert isinstance(first, NeedsReview)
+    review = db_session.get(EntityReview, first.review_id)
+    assert review is not None and len(review.candidates) == 2  # loaded into the session
+
+    _player(db_session, "Marcus Morris III")  # a third candidate for the same review
+    assert morris.full_name == "Marcus Morris"  # (re)load the unrelated object
+    again = resolver.player("espn", "123", "Marcus Morris", sport=Sport.NBA, team_id=None)
+    assert again == first
+
+    # the pre-loaded review reflects the upsert without an explicit refresh ...
+    assert len(review.candidates) == 3
+    # ... and unrelated loaded objects were not expired along with it
+    assert not inspect(morris).expired_attributes
