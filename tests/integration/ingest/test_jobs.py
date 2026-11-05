@@ -21,6 +21,7 @@ from sharpline.db.models import (
     PlayerGameStat,
     QuotaLedger,
     Result,
+    Source,
     SourceObservation,
     Team,
 )
@@ -183,3 +184,19 @@ def test_ingest_player_stats_derives_season_and_maps_events(db_session: Session)
     assert calls[0]["date_from_nullable"] == calls[0]["date_to_nullable"] == "10/28/2025"
     assert stats == WriteStats(written=2, skipped=3, reviews=0)  # only GSW-LAC has an event
     assert _count(db_session, PlayerGameStat) == 2
+
+
+@pytest.mark.usefixtures("teams")
+def test_parser_error_still_records_the_fetch(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_args: Any, **_kwargs: Any) -> Any:
+        raise ValueError("parser bug")
+
+    monkeypatch.setattr("sharpline.ingest.jobs.parse_odds", broken)
+    with pytest.raises(ValueError, match="parser bug"):
+        ingest_game_lines(db_session, _odds("nba_game_odds.json"))
+    assert _count(db_session, Source) == 1
+    assert _count(db_session, SourceObservation) == 1
+    assert _count(db_session, QuotaLedger) == 1
+    assert _count(db_session, Event) == 0  # the write step rolled back as a unit
