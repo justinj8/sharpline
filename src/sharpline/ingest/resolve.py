@@ -157,6 +157,10 @@ class EntityResolver:
             )
             .returning(EntityReview.id)
         )
-        review_id = self._session.execute(stmt).scalar_one()
-        self._session.expire_all()
-        return int(review_id)
+        review_id = int(self._session.execute(stmt).scalar_one())
+        # The Core upsert bypasses the identity map: expire just that review (if loaded)
+        # so it reloads, leaving the rest of the caller's session untouched.
+        loaded = self._session.identity_map.get(self._session.identity_key(EntityReview, review_id))
+        if loaded is not None:
+            self._session.expire(loaded)
+        return review_id
