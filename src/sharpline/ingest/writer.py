@@ -161,13 +161,11 @@ class Writer:
             if row.player_name is not None:
                 key = (event.id, row.player_name)
                 if key not in players:
-                    players[key] = self._resolver.player(
+                    players[key] = self._resolver.player_in_event(
                         provider,
                         row.player_name,
-                        row.player_name,
                         sport=Sport(event.sport),
-                        team_id=None,
-                        prefer_team_ids=(event.home_team_id, event.away_team_id),
+                        team_ids=(event.home_team_id, event.away_team_id),
                     )
                 resolution = players[key]
                 if isinstance(resolution, NeedsReview):
@@ -225,7 +223,7 @@ class Writer:
     # -- injuries, results, box scores ----------------------------------------------------
 
     def injuries(self, rows: Iterable[InjuryRow], source_id: int) -> WriteStats:
-        """Players resolve within the injury's team (R7); unchanged reports are not repeated."""
+        """Players resolve within the injury's team (R7a); unchanged reports are not repeated."""
         source = self._source(source_id)
         tally = _Tally()
         for row in rows:
@@ -235,7 +233,7 @@ class Writer:
                 continue
             player = self._resolver.player(
                 source.provider,
-                row.player_name,
+                f"{row.team_provider_id}:{row.player_name}",  # team-scoped key (R7a)
                 row.player_name,
                 sport=Sport(self._s.get_one(Team, team.entity_id).sport),
                 team_id=team.entity_id,
