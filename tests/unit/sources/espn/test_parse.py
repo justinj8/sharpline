@@ -123,3 +123,24 @@ def test_injury_entry_without_athlete_is_skipped(caplog: pytest.LogCaptureFixtur
         rows = parse_injuries(payload)
     assert len(rows) == total - 1
     assert "malformed" in caplog.text and "KeyError" in caplog.text
+
+
+def test_team_with_null_injuries_is_skipped(caplog: pytest.LogCaptureFixture) -> None:
+    payload = _load("nba_injuries.json")
+    kept = len(payload["injuries"][1]["injuries"])
+    payload["injuries"][0]["injuries"] = None
+    with caplog.at_level(logging.WARNING):
+        rows = parse_injuries(payload)
+    assert len(rows) == kept
+    assert {r.team_provider_id for r in rows} == {"2"}
+    assert "team 1 malformed" in caplog.text
+
+
+def test_non_dict_injury_entry_is_skipped(caplog: pytest.LogCaptureFixture) -> None:
+    payload = _load("nba_injuries.json")
+    total = sum(len(t["injuries"]) for t in payload["injuries"])
+    payload["injuries"][0]["injuries"][0] = "garbage"
+    with caplog.at_level(logging.WARNING):
+        rows = parse_injuries(payload)
+    assert len(rows) == total - 1
+    assert "AttributeError" in caplog.text
