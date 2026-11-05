@@ -22,11 +22,12 @@ from alembic import command
 from alembic.config import Config
 from dotenv import load_dotenv
 from sqlalchemy import Engine, create_engine, make_url, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from sharpline.db.models import Event, Market, Player, Team
 from sharpline.db.session import normalize_database_url
 from sharpline.db.sources import record_source
+from sharpline.sports.nba.teams import seed_nba_teams
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -42,12 +43,17 @@ def _alembic_config(url: str) -> Config:
 
 
 @contextmanager
-def _throwaway_database(admin_url: str) -> Iterator[str]:
-    """Create a uniquely named database, migrate it to head, yield its URL, drop it."""
+def _throwaway_database(admin_url: str, template: str | None = None) -> Iterator[str]:
+    """Create a uniquely named database, yield its URL, drop it.
+
+    It is migrated to head, or copied server-side from `template` (an already migrated
+    database nobody is connected to), which is much faster than migrating again.
+    """
     name = f"sharpline_test_{uuid.uuid4().hex[:8]}"
     admin = create_engine(normalize_database_url(admin_url), isolation_level="AUTOCOMMIT")
+    clone = f' TEMPLATE "{template}"' if template else ""
     with admin.connect() as conn:
-        conn.execute(text(f'CREATE DATABASE "{name}"'))
+        conn.execute(text(f'CREATE DATABASE "{name}"{clone}'))
 
     url = (
         make_url(normalize_database_url(admin_url))
@@ -55,7 +61,8 @@ def _throwaway_database(admin_url: str) -> Iterator[str]:
         .render_as_string(hide_password=False)
     )
     try:
-        command.upgrade(_alembic_config(url), "head")
+        if template is None:
+            command.upgrade(_alembic_config(url), "head")
         yield url
     finally:
         with admin.connect() as conn:
@@ -76,14 +83,50 @@ def pg_url() -> Iterator[str]:
         yield url
 
 
+@pytest.fixture(scope="session")
+def migrated_template() -> Iterator[str]:
+    """Name of a migrated database that is never connected to, cloned by `private_engine`."""
+    with _throwaway_database(_admin_url()) as url:
+        name = make_url(url).database
+        assert name is not None
+        yield name
+
+
 @pytest.fixture
-def private_engine() -> Iterator[Engine]:
+def private_engine(migrated_template: str) -> Iterator[Engine]:
     """A private migrated database for tests that must really commit (dropped afterwards),
     so their committed rows never reach the shared per-run test database."""
-    with _throwaway_database(_admin_url()) as url:
+    with _throwaway_database(_admin_url(), template=migrated_template) as url:
         eng = create_engine(url)
         try:
             yield eng
+        finally:
+            eng.dispose()
+
+
+@pytest.fixture(scope="session")
+def nba_template(migrated_template: str) -> Iterator[str]:
+    """Name of a migrated database with the NBA teams (and their xrefs) seeded, idle."""
+    with _throwaway_database(_admin_url(), template=migrated_template) as url:
+        eng = create_engine(url)
+        try:
+            with Session(eng) as session, session.begin():
+                seed_nba_teams(session)
+        finally:
+            eng.dispose()  # a template must have no open connections when it is copied
+        name = make_url(url).database
+        assert name is not None
+        yield name
+
+
+@pytest.fixture
+def db_session_factory(nba_template: str) -> Iterator[sessionmaker[Session]]:
+    """Sessions for code that commits its own work (the capture runner), on a private copy
+    of the NBA-seeded template that is dropped after the test: no table cleanup needed."""
+    with _throwaway_database(_admin_url(), template=nba_template) as url:
+        eng = create_engine(url)
+        try:
+            yield sessionmaker(bind=eng, expire_on_commit=False)
         finally:
             eng.dispose()
 

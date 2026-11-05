@@ -51,8 +51,12 @@ class OddsApiClient:
     def events(self) -> Fetched:
         return self._fetch(f"sports/{self._sport_key}/events", {})
 
-    def game_odds(self) -> Fetched:
-        return self._fetch(f"sports/{self._sport_key}/odds", self._odds_params(GAME_MARKETS))
+    def game_odds(self, event_ids: Sequence[str] | None = None) -> Fetched:
+        """Game lines for every upcoming event, or only `event_ids` (same credit cost)."""
+        params = self._odds_params(GAME_MARKETS)
+        if event_ids is not None:
+            params["eventIds"] = ",".join(event_ids)
+        return self._fetch(f"sports/{self._sport_key}/odds", params)
 
     def event_odds(self, event_id: str, markets: Sequence[str]) -> Fetched:
         return self._fetch(

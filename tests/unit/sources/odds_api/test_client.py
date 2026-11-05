@@ -76,6 +76,14 @@ def test_game_odds_request_shape() -> None:
     assert f.endpoint == "sports/basketball_nba/odds"
     assert "apiKey" not in f.params
     assert len(f.payload) == 2
+    assert "eventIds" not in seen[0].url.params
+
+
+def test_game_odds_can_be_scoped_to_events() -> None:
+    client, seen = _client("nba_game_odds.json", QUOTA_HEADERS)
+    f = client.game_odds(["evt2", "evt3"])
+    assert dict(seen[0].url.params)["eventIds"] == "evt2,evt3"
+    assert f.params["eventIds"] == "evt2,evt3"
 
 
 def test_events_without_quota_headers_gives_all_none_quota() -> None:

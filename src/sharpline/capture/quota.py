@@ -21,6 +21,10 @@ class QuotaGuard:
         self._remaining: int | None = None
 
     @property
+    def session_cap(self) -> int:
+        return self._session_cap
+
+    @property
     def credits_used(self) -> int:
         return self._used
 
