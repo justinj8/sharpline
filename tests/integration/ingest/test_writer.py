@@ -219,7 +219,8 @@ def test_writer_odds_keeps_per_book_lines_as_separate_markets(db_session: Sessio
         )
         snaps = db_session.scalars(select(OddsSnapshot).where(OddsSnapshot.market_id == market.id))
         assert sorted(s.side for s in snaps) == ["OVER", "UNDER"]
-    assert _xref(db_session, "odds_api", "player", "Jayson Tatum") == tatum
+    bos = _team(db_session, "BOS")
+    assert _xref(db_session, "odds_api", "player", f"Jayson Tatum|{bos}") == tatum
 
 
 @pytest.mark.usefixtures("teams")
@@ -277,7 +278,8 @@ def test_writer_odds_skips_unresolved_player_and_counts_review(db_session: Sessi
     assert stats == WriteStats(written=0, skipped=3, reviews=2)
     assert _count(db_session, Market) == 0
     review = db_session.scalars(select(EntityReview)).one()
-    assert (review.provider, review.provider_id) == ("odds_api", "Nobody Here")
+    bos, nyk = sorted((_team(db_session, "BOS"), _team(db_session, "NYK")))
+    assert (review.provider, review.provider_id) == ("odds_api", f"Nobody Here|{bos},{nyk}")
 
 
 @pytest.mark.usefixtures("teams")
@@ -328,7 +330,7 @@ def test_injuries_resolve_with_the_injury_team(db_session: Session) -> None:
     injury = db_session.scalars(select(Injury)).one()
     assert (injury.player_id, injury.status, injury.detail) == (hawk, "out", "ankle")
     assert (injury.reported_at, injury.source_id) == (reported, src)
-    assert _xref(db_session, "espn", "player", "Marcus Morris") == hawk
+    assert _xref(db_session, "espn", "player", "1:Marcus Morris") == hawk
 
 
 @pytest.mark.usefixtures("teams")
@@ -368,3 +370,42 @@ def test_player_stats_map_to_events_by_team_and_eastern_date(db_session: Session
     hield = _xref(db_session, "nba_stats", "player", "1627741")
     stat = db_session.scalars(select(PlayerGameStat).where(PlayerGameStat.player_id == hield)).one()
     assert stat.event_id == gsw_lac_id and stat.stats["points"] == 2.0
+
+
+@pytest.mark.usefixtures("teams")
+def test_same_name_players_on_different_teams_stay_distinct(db_session: Session) -> None:
+    celtic = _player(db_session, "Marcus Morris", "BOS")
+    laker = _player(db_session, "Marcus Morris", "LAL")
+    writer = _writer(db_session)
+    events = [
+        _event_row(),  # evt1: BOS vs NYK
+        _event_row(pid="evt2", home="Los Angeles Lakers", away="Denver Nuggets"),
+    ]
+    props = [
+        _odds("player_points", Side.OVER, -115, "10.5", player="Marcus Morris", pid="evt1"),
+        _odds("player_points", Side.OVER, -115, "8.5", player="Marcus Morris", pid="evt2"),
+    ]
+    for n in range(2):  # second pass resolves through the team-scoped xrefs
+        src = _source(db_session, "odds_api", {"pass": n})
+        writer.events(events, src)
+        assert writer.odds(props, src, is_closing=False).written == 2
+    by_line = {m.line: m.player_id for m in db_session.scalars(select(Market))}
+    assert by_line == {Decimal("10.5"): celtic, Decimal("8.5"): laker}
+    bos, lal = _team(db_session, "BOS"), _team(db_session, "LAL")
+    assert _xref(db_session, "odds_api", "player", f"Marcus Morris|{bos}") == celtic
+    assert _xref(db_session, "odds_api", "player", f"Marcus Morris|{lal}") == laker
+
+    injuries = [
+        InjuryRow(
+            team_provider_id=espn_id,  # ESPN ids: Boston 2, Lakers 13
+            player_name="Marcus Morris",
+            status="out",
+            detail=None,
+            reported_at=T0,
+        )
+        for espn_id in ("2", "13")
+    ]
+    assert writer.injuries(injuries, _source(db_session, "espn", {"i": 9})).written == 2
+    assert set(db_session.scalars(select(Injury.player_id))) == {celtic, laker}
+    assert _xref(db_session, "espn", "player", "2:Marcus Morris") == celtic
+    assert _xref(db_session, "espn", "player", "13:Marcus Morris") == laker

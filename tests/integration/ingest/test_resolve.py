@@ -171,3 +171,24 @@ def test_review_upsert_refreshes_only_that_review(db_session: Session) -> None:
     assert len(review.candidates) == 3
     # ... and unrelated loaded objects were not expired along with it
     assert not inspect(morris).expired_attributes
+
+
+def test_event_scoped_player_review_resolves_to_a_team_scoped_xref(db_session: Session) -> None:
+    seed_nba_teams(db_session)
+    bos, nyk = (
+        db_session.scalar(select(Team.id).where(Team.abbreviation == a)) for a in ("BOS", "NYK")
+    )
+    assert bos is not None and nyk is not None
+    celtic = _player(db_session, "Marcus Morris", bos)
+    _player(db_session, "Marcus Morris", nyk)
+    resolver = EntityResolver(db_session)
+    first = resolver.player_in_event(
+        "odds_api", "Marcus Morris", sport=Sport.NBA, team_ids=(bos, nyk)
+    )
+    assert isinstance(first, NeedsReview)  # same name on both teams of the event
+    resolver.resolve_review(first.review_id, celtic.id)
+    assert _xref(db_session, "odds_api", "player", f"Marcus Morris|{bos}") is not None
+    again = resolver.player_in_event(
+        "odds_api", "Marcus Morris", sport=Sport.NBA, team_ids=(bos, nyk)
+    )
+    assert again == Resolved(celtic.id)
