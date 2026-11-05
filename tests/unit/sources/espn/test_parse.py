@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,7 @@ def test_scoreboard_events_use_abbreviations_and_utc() -> None:
     assert (first.home_team, first.away_team) == ("DET", "PHI")
     assert first.commence_time == datetime(2026, 11, 5, 0, 0, tzinfo=UTC)
     assert first.commence_time.utcoffset() is not None
-    assert first.commence_time.utcoffset().total_seconds() == 0  # type: ignore[union-attr]
+    assert first.commence_time.utcoffset() == timedelta(0)
 
 
 def test_scoreboard_results_only_for_finals() -> None:
@@ -38,7 +38,7 @@ def test_scoreboard_results_only_for_finals() -> None:
     first = results[0]
     assert first.provider_event_id == "401909907"
     assert (first.home_score, first.away_score) == (112, 117)  # CLE home, OKC away
-    assert first.final_at == datetime(2026, 11, 3, 0, 0, tzinfo=UTC)
+    assert first.final_at is None  # writer stamps it from fetched_at (R4)
 
 
 def test_injuries_map_status_and_team() -> None:
@@ -92,3 +92,34 @@ def test_unknown_injury_status_logged_and_dropped(caplog: pytest.LogCaptureFixtu
     assert [r.player_name for r in rows] == ["B"]
     assert rows[0].status == "doubtful"
     assert "Suspension" in caplog.text
+
+
+def test_malformed_event_is_skipped_not_fatal(caplog: pytest.LogCaptureFixture) -> None:
+    payload = _load("nba_scoreboard_final.json")
+    good_id = payload["events"][1]["id"]
+    bad = payload["events"][0]
+    bad["competitions"][0]["competitors"][0]["score"] = ""  # final with empty score
+    with caplog.at_level(logging.WARNING):
+        events, results = parse_scoreboard(payload)
+    assert [e.provider_event_id for e in events] == [good_id]
+    assert [r.provider_event_id for r in results] == [good_id]
+    assert "malformed" in caplog.text and "ValueError" in caplog.text
+
+
+def test_event_without_competitions_is_skipped(caplog: pytest.LogCaptureFixture) -> None:
+    payload = _load("nba_scoreboard.json")
+    del payload["events"][0]["competitions"]
+    with caplog.at_level(logging.WARNING):
+        events, _ = parse_scoreboard(payload)
+    assert len(events) == 1
+    assert "KeyError" in caplog.text
+
+
+def test_injury_entry_without_athlete_is_skipped(caplog: pytest.LogCaptureFixture) -> None:
+    payload = _load("nba_injuries.json")
+    total = sum(len(t["injuries"]) for t in payload["injuries"])
+    del payload["injuries"][0]["injuries"][0]["athlete"]
+    with caplog.at_level(logging.WARNING):
+        rows = parse_injuries(payload)
+    assert len(rows) == total - 1
+    assert "malformed" in caplog.text and "KeyError" in caplog.text
