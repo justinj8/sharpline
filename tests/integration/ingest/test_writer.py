@@ -409,3 +409,42 @@ def test_same_name_players_on_different_teams_stay_distinct(db_session: Session)
     assert set(db_session.scalars(select(Injury.player_id))) == {celtic, laker}
     assert _xref(db_session, "espn", "player", "2:Marcus Morris") == celtic
     assert _xref(db_session, "espn", "player", "13:Marcus Morris") == laker
+
+
+@pytest.mark.usefixtures("teams")
+def test_reparsing_an_older_source_never_reverts_a_newer_score(db_session: Session) -> None:
+    writer = _writer(db_session)
+    t1, t2 = T0 + timedelta(hours=6), T0 + timedelta(hours=7)
+    writer.events([_event_row("espn", "401", "BOS", "NY")], _source(db_session, "espn", {"e": 1}))
+    row = ResultRow(provider_event_id="401", home_score=110, away_score=99, final_at=None)
+    old = _source(db_session, "espn", {"r": 1}, t1)
+    new = _source(db_session, "espn", {"r": 2}, t2)
+
+    writer.results([row], old)
+    writer.results([row.model_copy(update={"home_score": 111})], new)
+    writer.results([row], old)  # reparse of the older source
+
+    result = db_session.scalars(select(Result)).one()
+    assert (result.home_score, result.final_at, result.source_id) == (111, t1, new)
+
+
+@pytest.mark.usefixtures("teams")
+def test_tip_moves_only_beyond_ten_minutes(db_session: Session) -> None:
+    writer = _writer(db_session)
+    writer.events(
+        [_event_row("espn", "401", "BOS", "NY", TIP)], _source(db_session, "espn", {"e": 1})
+    )
+    seven_later = _event_row(tip=TIP + timedelta(minutes=7))
+    writer.events([seven_later], _source(db_session, "odds_api", {"e": 1}))
+    event = db_session.scalars(select(Event)).one()
+    assert event.commence_time == TIP  # providers disagreeing by minutes do not flip it
+    writer.events([seven_later], _source(db_session, "odds_api", {"e": 1.5}))  # xref hit now
+    assert event.commence_time == TIP
+
+    rescheduled = TIP + timedelta(hours=2, minutes=30)
+    writer.events(
+        [_event_row("espn", "401", "BOS", "NY", rescheduled)], _source(db_session, "espn", {"e": 2})
+    )
+    assert event.commence_time == rescheduled
+    writer.events([seven_later], _source(db_session, "odds_api", {"e": 2}))  # stale odds tip
+    assert event.commence_time == TIP + timedelta(minutes=7)
