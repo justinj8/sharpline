@@ -33,7 +33,7 @@ def _competitor(competitors: list[dict[str, Any]], side: str) -> dict[str, Any] 
     return next((c for c in competitors if c.get("homeAway") == side), None)
 
 
-_SKIPPABLE = (KeyError, IndexError, TypeError, ValueError, ValidationError)
+_SKIPPABLE = (KeyError, IndexError, TypeError, ValueError, AttributeError, ValidationError)
 
 
 def _parse_event(ev: dict[str, Any]) -> tuple[EventRow, ResultRow | None] | None:
@@ -109,8 +109,11 @@ def parse_injuries(payload: dict[str, Any]) -> list[InjuryRow]:
         try:
             team_id = str(team["id"])
             entries = team.get("injuries", [])
+            if not isinstance(entries, list):
+                raise TypeError("injuries is not a list")
         except _SKIPPABLE as exc:
-            log.warning("espn injury team malformed (%s); skipped", type(exc).__name__)
+            ident = team.get("id", "unknown") if isinstance(team, dict) else "unknown"
+            log.warning("espn injury team %s malformed (%s); skipped", ident, type(exc).__name__)
             continue
         for entry in entries:
             try:
