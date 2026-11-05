@@ -115,14 +115,28 @@ def _write_odds(
     )
 
 
+def ingest_odds_events(
+    session: Session, odds: OddsApiClient, *, capture_run_id: int | None = None
+) -> WriteStats:
+    """The Odds API event list (0 credits): links its event ids to our events (R2)."""
+    fetched = odds.events()
+
+    def write(w: Writer, sid: int) -> WriteStats:
+        return w.events(parse_events(fetched.payload), sid)
+
+    return _run(session, fetched, write, capture_run_id=capture_run_id)
+
+
 def ingest_game_lines(
     session: Session,
     odds: OddsApiClient,
     *,
+    event_ids: Sequence[str] | None = None,
     is_closing: bool = False,
     capture_run_id: int | None = None,
 ) -> WriteStats:
-    return _write_odds(session, odds.game_odds(), is_closing, capture_run_id)
+    """Game lines for every upcoming event, or only `event_ids` (Odds API ids)."""
+    return _write_odds(session, odds.game_odds(event_ids), is_closing, capture_run_id)
 
 
 def ingest_props(

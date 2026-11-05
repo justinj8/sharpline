@@ -135,10 +135,11 @@ def plan_captures(games: Sequence[SlateGame], now: datetime, budget: Budget) -> 
                 "closing",
             )
 
-    return _fit_budget(sorted(actions), budget.session_cap)
+    return fit_budget(sorted(actions), budget.session_cap)
 
 
-def _fit_budget(actions: list[CaptureAction], cap: int) -> CapturePlan:
+def fit_budget(actions: list[CaptureAction], cap: int) -> CapturePlan:
+    """Drop actions in R10 order until the total fits `cap`; also used for re-plans."""
     closing_cost = sum(a.est_cost for a in actions if a.kind == "closing")
     if closing_cost > cap:
         raise ClosingExceedsBudget(f"closing snapshots cost {closing_cost} > session_cap {cap}")
