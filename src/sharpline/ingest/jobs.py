@@ -21,7 +21,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, datetime
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -35,13 +37,84 @@ from sharpline.sources.nba_stats.client import NbaStatsClient
 from sharpline.sources.nba_stats.parse import parse_player_game_logs
 from sharpline.sources.odds_api.client import OddsFeed
 from sharpline.sources.odds_api.parse import parse_events, parse_odds
+from sharpline.sources.rows import EventRow
 from sharpline.sports.nba.season import season_for
 
 CLOSING = "closing"
 
+# Writes the non-event rows of one payload: (writer, payload, source_id, observed_at,
+# is_closing). `observed_at` is when that payload was fetched (odds captured_at).
+RowWriter = Callable[[Writer, Any, int, datetime, bool], WriteStats]
+
+
+@dataclass(frozen=True)
+class Parser:
+    """How one provider endpoint's payload becomes typed rows: pure parser + writer method.
+
+    Shared by the jobs (parse on write) and `reparse` (rebuild from stored sources), so the
+    two paths cannot drift. Events are a separate step because reparse writes every
+    source's events first, in fetch order (R9), before any rows that hang off them.
+    """
+
+    events: Callable[[Any], list[EventRow]] | None = None
+    rows: RowWriter | None = None
+
+    def write(
+        self,
+        w: Writer,
+        payload: Any,
+        source_id: int,
+        observed_at: datetime,
+        *,
+        is_closing: bool = False,
+    ) -> WriteStats:
+        stats = WriteStats()
+        if self.events is not None:
+            stats += w.events(self.events(payload), source_id)
+        if self.rows is not None:
+            stats += self.rows(w, payload, source_id, observed_at, is_closing)
+        return stats
+
+
+def scoreboard_events(payload: Any) -> list[EventRow]:
+    return parse_scoreboard(payload)[0]
+
+
+def odds_events(payload: Any) -> list[EventRow]:
+    # Odds payloads carry their event's teams and tip, so upserting those events first links
+    # an Odds API event id to our event (by xref, or teams + tip within 2 h).
+    return parse_events(payload if isinstance(payload, list) else [payload])
+
+
+def write_results(w: Writer, payload: Any, sid: int, _at: datetime, _closing: bool) -> WriteStats:
+    return w.results(parse_scoreboard(payload)[1], sid)
+
+
+def write_injuries(w: Writer, payload: Any, sid: int, _at: datetime, _closing: bool) -> WriteStats:
+    return w.injuries(parse_injuries(payload), sid)
+
+
+def write_odds(w: Writer, payload: Any, sid: int, at: datetime, closing: bool) -> WriteStats:
+    return w.odds(parse_odds(payload, at), sid, is_closing=closing)
+
+
+def write_player_stats(
+    w: Writer, payload: Any, sid: int, _at: datetime, _closing: bool
+) -> WriteStats:
+    return w.player_stats(parse_player_game_logs(payload), sid)
+
+
+SCHEDULE = Parser(events=scoreboard_events)
+RESULTS = Parser(events=scoreboard_events, rows=write_results)
+INJURIES = Parser(rows=write_injuries)
+ODDS_EVENTS = Parser(events=odds_events)
+ODDS = Parser(events=odds_events, rows=write_odds)
+PLAYER_STATS = Parser(rows=write_player_stats)
+
 
 @contextmanager
-def _transaction(session: Session) -> Iterator[None]:
+def transaction(session: Session) -> Iterator[None]:
+    """One unit of work: its own committed transaction on an idle session, else a savepoint."""
     if session.in_transaction():
         with session.begin_nested():
             yield
@@ -53,78 +126,44 @@ def _transaction(session: Session) -> Iterator[None]:
 def _run(
     session: Session,
     fetched: Fetched,
-    write: Callable[[Writer, int], WriteStats],
+    parser: Parser,
     *,
-    purpose: str | None = None,
+    is_closing: bool = False,
     capture_run_id: int | None = None,
 ) -> WriteStats:
-    with _transaction(session):
+    purpose = CLOSING if is_closing else None
+    with transaction(session):
         source_id = record_fetch(session, fetched, capture_run_id=capture_run_id, purpose=purpose)
-    with _transaction(session):
-        return write(Writer(session, EntityResolver(session)), source_id)
+    with transaction(session):
+        writer = Writer(session, EntityResolver(session))
+        return parser.write(
+            writer, fetched.payload, source_id, fetched.fetched_at, is_closing=is_closing
+        )
 
 
 def ingest_schedule(
     session: Session, espn: EspnClient, slate_date: date, *, capture_run_id: int | None = None
 ) -> WriteStats:
-    fetched = espn.scoreboard(slate_date)
-
-    def write(w: Writer, sid: int) -> WriteStats:
-        events, _ = parse_scoreboard(fetched.payload)
-        return w.events(events, sid)
-
-    return _run(session, fetched, write, capture_run_id=capture_run_id)
+    return _run(session, espn.scoreboard(slate_date), SCHEDULE, capture_run_id=capture_run_id)
 
 
 def ingest_results(
     session: Session, espn: EspnClient, slate_date: date, *, capture_run_id: int | None = None
 ) -> WriteStats:
-    fetched = espn.scoreboard(slate_date)
-
-    def write(w: Writer, sid: int) -> WriteStats:
-        events, results = parse_scoreboard(fetched.payload)
-        return w.events(events, sid) + w.results(results, sid)
-
-    return _run(session, fetched, write, capture_run_id=capture_run_id)
+    return _run(session, espn.scoreboard(slate_date), RESULTS, capture_run_id=capture_run_id)
 
 
 def ingest_injuries(
     session: Session, espn: EspnClient, *, capture_run_id: int | None = None
 ) -> WriteStats:
-    fetched = espn.injuries()
-
-    def write(w: Writer, sid: int) -> WriteStats:
-        return w.injuries(parse_injuries(fetched.payload), sid)
-
-    return _run(session, fetched, write, capture_run_id=capture_run_id)
-
-
-def _write_odds(
-    session: Session, fetched: Fetched, is_closing: bool, run: int | None
-) -> WriteStats:
-    def write(w: Writer, sid: int) -> WriteStats:
-        # Odds payloads carry their event's teams and tip, so upsert those events first:
-        # that links an Odds API event id to our event (by xref, or teams + tip within 2 h).
-        payload = fetched.payload
-        events = parse_events(payload if isinstance(payload, list) else [payload])
-        rows = parse_odds(payload, fetched.fetched_at)
-        return w.events(events, sid) + w.odds(rows, sid, is_closing=is_closing)
-
-    return _run(
-        session, fetched, write, purpose=CLOSING if is_closing else None, capture_run_id=run
-    )
+    return _run(session, espn.injuries(), INJURIES, capture_run_id=capture_run_id)
 
 
 def ingest_odds_events(
     session: Session, odds: OddsFeed, *, capture_run_id: int | None = None
 ) -> WriteStats:
     """The Odds API event list (0 credits): links its event ids to our events (R2)."""
-    fetched = odds.events()
-
-    def write(w: Writer, sid: int) -> WriteStats:
-        return w.events(parse_events(fetched.payload), sid)
-
-    return _run(session, fetched, write, capture_run_id=capture_run_id)
+    return _run(session, odds.events(), ODDS_EVENTS, capture_run_id=capture_run_id)
 
 
 def ingest_game_lines(
@@ -136,7 +175,8 @@ def ingest_game_lines(
     capture_run_id: int | None = None,
 ) -> WriteStats:
     """Game lines for every upcoming event, or only `event_ids` (Odds API ids)."""
-    return _write_odds(session, odds.game_odds(event_ids), is_closing, capture_run_id)
+    fetched = odds.game_odds(event_ids)
+    return _run(session, fetched, ODDS, is_closing=is_closing, capture_run_id=capture_run_id)
 
 
 def ingest_props(
@@ -148,7 +188,8 @@ def ingest_props(
     is_closing: bool = False,
     capture_run_id: int | None = None,
 ) -> WriteStats:
-    return _write_odds(session, odds.event_odds(event_id, markets), is_closing, capture_run_id)
+    fetched = odds.event_odds(event_id, markets)
+    return _run(session, fetched, ODDS, is_closing=is_closing, capture_run_id=capture_run_id)
 
 
 def ingest_player_stats(
@@ -161,8 +202,4 @@ def ingest_player_stats(
 ) -> WriteStats:
     """Box scores for `slate_date`; the season defaults to the one containing it (R5)."""
     fetched = nba.player_game_logs(season or season_for(slate_date), slate_date, slate_date)
-
-    def write(w: Writer, sid: int) -> WriteStats:
-        return w.player_stats(parse_player_game_logs(fetched.payload), sid)
-
-    return _run(session, fetched, write, capture_run_id=capture_run_id)
+    return _run(session, fetched, PLAYER_STATS, capture_run_id=capture_run_id)
