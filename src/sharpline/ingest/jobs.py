@@ -204,3 +204,12 @@ def ingest_player_stats(
     """Box scores for `slate_date`; the season defaults to the one containing it (R5)."""
     fetched = nba.player_game_logs(season or season_for(slate_date), slate_date, slate_date)
     return _run(session, fetched, PLAYER_STATS, capture_run_id=capture_run_id)
+
+
+def ingest_season_player_stats(
+    session: Session, nba: NbaStatsClient, season: str, *, capture_run_id: int | None = None
+) -> WriteStats:
+    """A whole season's box scores (backfill). Games map to stored events only (R1): rows
+    for games with no stored event are skipped, and a later reparse can attach them."""
+    fetched = nba.player_game_logs(season)
+    return _run(session, fetched, PLAYER_STATS, capture_run_id=capture_run_id)

@@ -221,3 +221,27 @@ def seeded_player(db_session: Session) -> int:
     db_session.add(player)
     db_session.flush()
     return player.id
+
+
+def settings_env_names() -> set[str]:
+    """Every environment variable `Settings` can read, derived from its fields."""
+    from sharpline.config import Settings
+
+    names: set[str] = set()
+    for field_name, field in Settings.model_fields.items():
+        names.add(field_name.upper())
+        alias = field.validation_alias
+        choices = getattr(alias, "choices", [alias] if isinstance(alias, str) else [])
+        names.update(str(c).upper() for c in choices)
+    return names
+
+
+@pytest.fixture
+def cli_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Run the CLI with no inherited settings: conftest loaded `.env` into os.environ (real
+    API keys, bucket credentials, the dev DATABASE_URL), so drop every Settings variable and
+    work from an empty directory with no `.env`. Tests set what they need."""
+    for name in settings_env_names():
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(tmp_path)
+    return tmp_path

@@ -8,7 +8,7 @@ import structlog
 
 from sharpline.config import get_settings
 from sharpline.observability.logging import configure_logging
-from sharpline_worker.app import LIVE_NOT_WIRED, build_app, worker_queues
+from sharpline_worker.app import build_app, worker_concurrency, worker_queues
 
 
 async def _run() -> None:
@@ -16,12 +16,13 @@ async def _run() -> None:
     configure_logging(settings.log_level, json_output=settings.env != "local")
     app = build_app(settings)
     queues = worker_queues(settings)
+    concurrency = worker_concurrency(settings)
     log = structlog.get_logger()
-    log.info("worker.start", queues=queues, env=settings.env)
+    log.info("worker.start", queues=queues, concurrency=concurrency, env=settings.env)
     if settings.live_capture:
-        log.warning(LIVE_NOT_WIRED, setting="SHARPLINE_LIVE_CAPTURE")
+        log.warning("capture.live.enabled", setting="SHARPLINE_LIVE_CAPTURE")
     async with app.open_async():
-        await app.run_worker_async(queues=queues)
+        await app.run_worker_async(queues=queues, concurrency=concurrency)
 
 
 def main() -> None:

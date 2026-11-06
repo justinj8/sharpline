@@ -18,6 +18,9 @@ dependencies = [
     "httpx==0.28.1",
 ]
 
+[project.scripts]
+sharpline = "sharpline.cli:app"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

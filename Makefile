@@ -7,7 +7,7 @@ include .env
 export
 endif
 
-.PHONY: help fmt lint typecheck test test.unit test.integration check db.migrate dev worker
+.PHONY: help fmt lint typecheck test test.unit test.integration check db.migrate dev worker cli plan
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_.-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "%-18s %s\n", $$1, $$2}'
@@ -42,3 +42,9 @@ dev: ## Run the API with reload on :8000
 
 worker: ## Run the procrastinate worker
 	uv run python -m sharpline_worker
+
+cli: ## sharpline CLI with .env loaded, e.g. make cli ARGS="quota"
+	uv run sharpline $(ARGS)
+
+plan: ## Dry-run capture plan for a slate: make plan DATE=YYYY-MM-DD (ESPN schedule only)
+	uv run sharpline capture nba --date $(DATE) --dry-run
