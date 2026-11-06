@@ -76,6 +76,13 @@ def _market_line(row: OddsRow) -> Decimal | None:
     return row.line
 
 
+def _moves_tip(stored: datetime, reported: datetime) -> bool:
+    """R9 (revised): an earlier tip is always taken, so a closing planned from the stored tip
+    never lands after the real one; a later tip only on a real reschedule (> 10 min), since
+    providers disagree by minutes. Depends only on the rows' order, so reparse replays it."""
+    return reported < stored or reported - stored > TIP_MOVE_THRESHOLD
+
+
 class Writer:
     def __init__(self, session: Session, resolver: EntityResolver) -> None:
         self._s = session
@@ -101,8 +108,7 @@ class Writer:
                     row, home.entity_id, away.entity_id
                 )
                 self._add_xref("event", event.id, row.provider, row.provider_event_id)
-            # R9: providers disagree by minutes; only a real reschedule moves the tip.
-            if abs(event.commence_time - row.commence_time) > TIP_MOVE_THRESHOLD:
+            if _moves_tip(event.commence_time, row.commence_time):
                 event.commence_time = row.commence_time
             tally.written += 1
         self._s.flush()

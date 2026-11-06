@@ -407,7 +407,8 @@ def test_reparsing_an_older_source_never_reverts_a_newer_score(db_session: Sessi
     assert (result.home_score, result.final_at, result.source_id) == (111, t1, new)
 
 
-def test_tip_moves_only_beyond_ten_minutes(db_session: Session) -> None:
+def test_tip_moves_later_only_beyond_ten_minutes(db_session: Session) -> None:
+    """R9 (revised): a later report moves the tip only when it is more than 10 min later."""
     writer = _writer(db_session)
     writer.events(
         [_event_row("espn", "401", "BOS", "NY", TIP)], _source(db_session, "espn", {"e": 1})
@@ -424,5 +425,27 @@ def test_tip_moves_only_beyond_ten_minutes(db_session: Session) -> None:
         [_event_row("espn", "401", "BOS", "NY", rescheduled)], _source(db_session, "espn", {"e": 2})
     )
     assert event.commence_time == rescheduled
-    writer.events([seven_later], _source(db_session, "odds_api", {"e": 2}))  # stale odds tip
+    writer.events([seven_later], _source(db_session, "odds_api", {"e": 2}))  # earlier: taken
     assert event.commence_time == TIP + timedelta(minutes=7)
+
+
+def test_tip_moves_earlier_always(db_session: Session) -> None:
+    """R9 (revised): any earlier report is taken at once, so a closing planned from the stored
+    tip can never land after the real tip; the later report then leaves it alone."""
+    writer = _writer(db_session)
+    writer.events(
+        [_event_row("espn", "401", "BOS", "NY", TIP)], _source(db_session, "espn", {"e": 1})
+    )
+    event = db_session.scalars(select(Event)).one()
+    five_earlier = TIP - timedelta(minutes=5)
+    writer.events([_event_row(tip=five_earlier)], _source(db_session, "odds_api", {"e": 1}))
+    assert event.commence_time == five_earlier
+    writer.events(  # ESPN still says TIP: 5 min later, within the threshold, so it stays
+        [_event_row("espn", "401", "BOS", "NY", TIP)], _source(db_session, "espn", {"e": 1.5})
+    )
+    assert event.commence_time == five_earlier
+    one_earlier = five_earlier - timedelta(minutes=1)
+    writer.events(
+        [_event_row("espn", "401", "BOS", "NY", one_earlier)], _source(db_session, "espn", {"e": 2})
+    )
+    assert event.commence_time == one_earlier
