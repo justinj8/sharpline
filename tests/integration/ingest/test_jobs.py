@@ -33,6 +33,7 @@ from sharpline.ingest.jobs import (
     ingest_results,
     ingest_schedule,
 )
+from sharpline.ingest.reparse import reparse
 from sharpline.ingest.writer import WriteStats
 from sharpline.sources.espn.client import EspnClient
 from sharpline.sources.http import HttpClient
@@ -237,3 +238,33 @@ def test_schedule_seeing_a_final_writes_the_result(db_session: Session) -> None:
     results = db_session.scalars(select(Result)).all()
     assert len(results) == 2 and all(r.final_at == T0 for r in results)
     assert set(db_session.scalars(select(Event.status))) == {"final"}
+
+
+def test_closing_fetched_after_a_tip_has_no_closing_snapshot_even_on_reparse(
+    db_session: Session,
+) -> None:
+    """F6: evt1 tipped at 00:00; a closing fetch at 00:05 prices only evt2 (tip 02:30), and
+    reparsing the stored closing source does not flag evt1's prices either."""
+    late = datetime(2026, 11, 5, 0, 5, tzinfo=UTC)
+    http = _http("https://api.the-odds-api.com/v4", "odds_api/nba_game_odds.json", QUOTA)
+    client = OddsApiClient(SecretStr("sk-test"), http, clock=lambda: late)
+    ingest_game_lines(db_session, client, is_closing=True)
+
+    def closing_events() -> set[str]:
+        rows = db_session.execute(
+            select(EntityXref.provider_id)
+            .join(Market, Market.event_id == EntityXref.entity_id)
+            .join(OddsSnapshot, OddsSnapshot.market_id == Market.id)
+            .where(
+                EntityXref.provider == "odds_api",
+                EntityXref.entity_kind == "event",
+                OddsSnapshot.is_closing,
+            )
+        )
+        return {r[0] for r in rows}
+
+    assert closing_events() == {"evt2"}
+    before = _count(db_session, OddsSnapshot)
+    reparse(db_session, provider="odds_api")
+    assert closing_events() == {"evt2"}
+    assert _count(db_session, OddsSnapshot) == before

@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +94,11 @@ class World:
         self.costs: dict[tuple[str, datetime], int] = {}
         self.omit_last = False  # drop the x-requests-last header (proxies, caches)
         self.props_status: int | None = None  # answer every props call with this HTTP status
+        # a game-lines call made at this time takes this long to answer (the clock moves on)
+        self.slow_lines: dict[datetime, timedelta] = {}
+        self.espn_status: dict[
+            str, str
+        ] = {}  # ESPN status names by Odds API id (default scheduled)
         self._used = 0
 
     @property
@@ -109,7 +114,7 @@ class World:
             {
                 "id": ESPN_IDS[key],
                 "date": tip.strftime("%Y-%m-%dT%H:%MZ"),
-                "status": {"type": {"name": "STATUS_SCHEDULED"}},
+                "status": {"type": {"name": self.espn_status.get(key, "STATUS_SCHEDULED")}},
                 "competitions": [
                     {
                         "competitors": [
@@ -148,6 +153,9 @@ class World:
                 ("props", self.clock()), len(request.url.params["markets"].split(","))
             )
         else:
+            delay = self.slow_lines.pop(self.clock(), None)
+            if delay is not None:
+                self.clock.now += delay
             wanted = request.url.params.get("eventIds")
             body = [
                 self._retimed(e)
@@ -516,3 +524,57 @@ def test_delisted_event_errors_do_not_open_the_breaker(
     assert closing["status"] == "failed"  # its props 404 again, but its game lines ran
     for odds_id in ("evt1", "evt2"):
         assert _closing_snapshots(sessions, _event_pk(sessions, odds_id))
+
+
+def test_postponed_game_is_dropped_at_the_next_schedule_refresh(
+    sessions: sessionmaker[Session],
+) -> None:
+    """F3: an ESPN refresh mid-session reports evt2 postponed: its T-90 props and closing are
+    dropped (recorded with the reason) and no Odds API props call is made for it."""
+    clock = FakeClock(_hm(23, 0))
+    world = World(clock, {"evt1": TIP1, "evt2": TIP2})
+
+    def postpone() -> None:  # before the 00:00 hourly refresh
+        world.espn_status["evt2"] = "STATUS_POSTPONED"
+
+    clock.hooks[_hm(0, 0)] = postpone
+    run_id = _runner(sessions, clock, world).run(Sport.NBA, SLATE)
+    assert clock.hooks == {}
+
+    run = _run(sessions, run_id)
+    assert run.status == "completed"
+    with sessions() as session:
+        assert session.get_one(Event, _event_pk(sessions, "evt2")).status == "postponed"
+    assert [(e["event_ids"], e["status"]) for e in _entries(run, "closing")] == [(["evt1"], "done")]
+    dropped = [(d["kind"], d["at"], d["event_ids"], d["detail"]) for d in run.plan["dropped"]]
+    assert dropped == [
+        ("props", _iso(_hm(1, 0)), ["evt2"], "evt2: tip_moved"),
+        ("closing", _iso(_hm(2, 27)), ["evt2"], "evt2: tip_moved"),
+    ]
+    assert all(d["status"] == "skipped" for d in run.plan["dropped"])
+    assert run.plan["pending"] == []
+    late_evt2 = [
+        url for at, url in world.odds_calls if at >= _hm(0, 0) and "/events/evt2/" in url.path
+    ]
+    assert late_evt2 == []
+    assert _closing_snapshots(sessions, _event_pk(sessions, "evt2")) == []
+
+
+def test_closing_rechecks_the_tip_before_each_odds_call(sessions: sessionmaker[Session]) -> None:
+    """F6: the closing batch's game-lines call answers after tip, so the props calls that
+    would follow are not made ("started"), and the late lines are not closing snapshots."""
+    clock = FakeClock(_hm(23, 0))
+    world = World(clock, {"evt1": TIP1, "evt2": TIP1})  # one shared tip: one closing batch
+    world.slow_lines[_hm(23, 57)] = timedelta(minutes=4)  # answers at 00:01
+    run_id = _runner(sessions, clock, world).run(Sport.NBA, SLATE)
+
+    run = _run(sessions, run_id)
+    [closing] = _entries(run, "closing")
+    assert closing["status"] == "done"
+    assert closing["detail"] == "evt1: started; evt2: started"
+    closing_props = [
+        url for at, url in world.odds_calls if at >= _hm(23, 57) and "/events/" in url.path
+    ]
+    assert closing_props == []
+    for odds_id in ("evt1", "evt2"):
+        assert _closing_snapshots(sessions, _event_pk(sessions, odds_id)) == []

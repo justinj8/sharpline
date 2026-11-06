@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from sharpline.domain.enums import Sport
+from sharpline.domain.enums import EventStatus, Sport
 from sharpline.sources.espn.parse import parse_injuries, parse_scoreboard
 
 FIXTURES = Path(__file__).parents[3] / "fixtures" / "espn"
@@ -144,3 +144,35 @@ def test_non_dict_injury_entry_is_skipped(caplog: pytest.LogCaptureFixture) -> N
         rows = parse_injuries(payload)
     assert len(rows) == total - 1
     assert "AttributeError" in caplog.text
+
+
+def _with_status(name: str, state: str | None = None) -> dict[str, Any]:
+    payload = _load("nba_scoreboard.json")
+    event = payload["events"][0]
+    event["status"]["type"] = {"name": name} if state is None else {"name": name, "state": state}
+    payload["events"] = [event]
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("name", "state", "expected"),
+    [
+        ("STATUS_SCHEDULED", "pre", EventStatus.SCHEDULED),
+        ("STATUS_IN_PROGRESS", "in", EventStatus.IN_PROGRESS),
+        ("STATUS_HALFTIME", "in", EventStatus.IN_PROGRESS),
+        ("STATUS_END_PERIOD", "in", EventStatus.IN_PROGRESS),
+        ("STATUS_FINAL", "post", EventStatus.FINAL),
+        ("STATUS_POSTPONED", "post", EventStatus.POSTPONED),
+        ("STATUS_CANCELED", "post", EventStatus.CANCELED),
+        ("STATUS_SUSPENDED", "in", EventStatus.SUSPENDED),
+        ("STATUS_SOMETHING_NEW", "in", EventStatus.IN_PROGRESS),  # unknown name, live state
+        ("STATUS_SOMETHING_NEW", "pre", EventStatus.SCHEDULED),
+        ("STATUS_SOMETHING_NEW", None, None),  # nothing to go on: the writer keeps the status
+    ],
+)
+def test_scoreboard_maps_event_status(
+    name: str, state: str | None, expected: EventStatus | None
+) -> None:
+    [event], results = parse_scoreboard(_with_status(name, state))
+    assert event.status == expected
+    assert bool(results) == (expected == EventStatus.FINAL)

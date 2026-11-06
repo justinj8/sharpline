@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from sharpline.domain.enums import MarketType, Period, Side, Sport
+from sharpline.domain.enums import EventStatus, MarketType, Period, Side, Sport
 from sharpline.domain.time import ensure_utc
 
 
@@ -20,6 +20,8 @@ class EventRow(_Row):
     home_team: str
     away_team: str
     commence_time: datetime
+    # What the provider says about the game; None when it says nothing (the Odds API).
+    status: EventStatus | None = None
 
     @field_validator("commence_time")
     @classmethod

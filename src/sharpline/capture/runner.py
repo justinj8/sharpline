@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import bisect
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from functools import partial
 from typing import Any, Literal
@@ -31,7 +31,7 @@ from sharpline.capture.plan import (
 )
 from sharpline.capture.quota import QuotaGuard
 from sharpline.db.models import CaptureRun, EntityXref, Event
-from sharpline.domain.enums import Sport
+from sharpline.domain.enums import EventStatus, Sport
 from sharpline.ingest import jobs
 from sharpline.ingest.writer import WriteStats
 from sharpline.sources.espn import PROVIDER as ESPN
@@ -80,6 +80,10 @@ class _Call:
     label: str
     est: int
     job: Job
+    # A closing call's games, re-checked against their tips right before it runs (F6), and
+    # how to rebuild the job for the games still ahead (None: the call covers one game).
+    games: tuple[str, ...] = ()
+    rescope: Callable[[tuple[str, ...]], Job] | None = None
 
 
 @dataclass(frozen=True)
@@ -110,7 +114,7 @@ def load_slate(
             Event.sport == sport.value,
             Event.commence_time >= start,
             Event.commence_time < end,
-            Event.status == "scheduled",
+            Event.status == EventStatus.SCHEDULED,
         )
     ).all()
     keys: dict[int, tuple[str, str]] = {}
@@ -140,6 +144,15 @@ def _entry(a: CaptureAction, status: str, detail: str | None) -> dict[str, Any]:
         "status": status,
         "detail": detail,
     }
+
+
+def _gone_reason(status: str) -> str:
+    """Why a game left the slate (or a closing skips it), from its stored status."""
+    if status in (EventStatus.SCHEDULED, EventStatus.POSTPONED):
+        return "tip_moved"  # postponed, or moved off the slate day
+    if status == EventStatus.CANCELED:
+        return "canceled"
+    return "started"
 
 
 def _error(exc: Exception) -> str:
@@ -210,6 +223,9 @@ class CaptureRunner:
         self._log: list[dict[str, Any]] = []
         self._pending: list[CaptureAction] = []
         self._dropped: dict[CaptureAction, dict[str, Any]] = {}
+        # Props and closings of games that left the slate (postponed, canceled, moved to
+        # another day): kept across re-plans, unlike budget drops, which each re-plan redoes.
+        self._off_slate: dict[CaptureAction, dict[str, Any]] = {}
         self._replans = 0
         self._keys: dict[str, int] = {}  # plan event id -> events.id
         self._odds_keys: set[str] = set()  # plan event ids that are Odds API ids
@@ -272,7 +288,9 @@ class CaptureRunner:
         Planning from the session start keeps the 30-min/hourly grid and the planner's
         reasons (so its drop order) stable; actions before `t` are history and discarded.
         """
-        raw = plan_captures(self._load_slate(), self._start, Budget(_UNCAPPED, len(self._markets)))
+        slate = self._load_slate()
+        self._drop_off_slate(t, {g.provider_event_id for g in slate})
+        raw = plan_captures(slate, self._start, Budget(_UNCAPPED, len(self._markets)))
         remaining = [a for a in raw.actions if a.kind != "schedule" and a.at >= t]
         last_closing = max((a.at for a in raw.actions if a.kind == "closing"), default=None)
         refresh = self._start + REFRESH_EVERY
@@ -299,6 +317,28 @@ class CaptureRunner:
         self._dropped = {a: e for a, e in self._dropped.items() if a.at < t}
         self._dropped.update({a: _entry(a, "skipped", why) for a, why in dropped})
         self._replans += 1
+
+    def _drop_off_slate(self, t: datetime, on_slate: set[str]) -> None:
+        """Record the pending props and closings of games no longer on the slate (F3): a
+        refresh that reports a game postponed or canceled takes it out of `load_slate`."""
+        self._off_slate = {
+            a: e for a, e in self._off_slate.items() if not on_slate.intersection(a.event_ids)
+        }
+        pending = [a for a in self._pending if a.kind in ("props", "closing") and a.at >= t]
+        gone = sorted({k for a in pending for k in a.event_ids if k not in on_slate})
+        if not gone:
+            return
+        with self._sessions() as session:
+            why = {k: _gone_reason(session.get_one(Event, self._keys[k]).status) for k in gone}
+        for a in pending:
+            ids = tuple(k for k in a.event_ids if k in why)
+            if not ids:
+                continue
+            cost = len(self._markets) * len(ids)
+            if a.kind == "closing" and ids == a.event_ids:
+                cost += GAME_LINES_COST  # the whole batch is gone, its game lines too
+            off = replace(a, event_ids=ids, est_cost=cost)
+            self._off_slate[off] = _entry(off, "skipped", "; ".join(f"{k}: {why[k]}" for k in ids))
 
     # -- execution ------------------------------------------------------------------------
 
@@ -334,30 +374,39 @@ class CaptureRunner:
         """Re-read each game first (R9): price only games still ahead of this slot."""
         now, keep, notes = self._clock(), [], []
         moved: dict[datetime, list[str]] = {}
+        tips: dict[str, datetime] = {}
         with self._sessions() as session:
             for key in a.event_ids:
                 event = session.get_one(Event, self._keys[key])
-                if event.status == "postponed":
-                    notes.append(f"{key}: tip_moved")
-                elif event.status != "scheduled" or event.commence_time <= now:
+                if event.status != EventStatus.SCHEDULED:
+                    notes.append(f"{key}: {_gone_reason(event.status)}")
+                elif event.commence_time <= now:
                     notes.append(f"{key}: started")
                 elif event.commence_time - CLOSING_LEAD > a.at:
                     notes.append(f"{key}: tip_moved")
                     moved.setdefault(event.commence_time - CLOSING_LEAD, []).append(key)
                 else:
                     keep.append(key)
+                    tips[key] = event.commence_time
         planned = {(p.at, k) for p in self._pending if p.kind == "closing" for k in p.event_ids}
         for at, keys in moved.items():
             new = tuple(sorted(k for k in keys if (at, k) not in planned))
             if new:
                 cost = GAME_LINES_COST + len(self._markets) * len(new)
                 bisect.insort(self._pending, CaptureAction(at, "closing", new, cost, "tip_moved"))
-        return self._odds_action(a, tuple(keep), notes)
+        return self._odds_action(a, tuple(keep), notes, tips)
 
     def _odds_action(
-        self, a: CaptureAction, ids: tuple[str, ...], notes: list[str]
+        self,
+        a: CaptureAction,
+        ids: tuple[str, ...],
+        notes: list[str],
+        tips: dict[str, datetime] | None = None,
     ) -> tuple[str, str | None]:
-        """Game lines (scoped to `ids`) and/or props per event, behind breaker and guard."""
+        """Game lines (scoped to `ids`) and/or props per event, behind breaker and guard.
+
+        With `tips` (a closing), each call first drops the games whose tip has passed.
+        """
         assert self._odds is not None
         if not self._breaker.allow(ODDS):
             raise _Skip("circuit_open")
@@ -371,13 +420,27 @@ class CaptureRunner:
             "capture_run_id": self._run_id,
         }
         calls: list[_Call] = []
+        closing = tips is not None
+
+        def game_lines(scope: tuple[str, ...]) -> Job:
+            return partial(jobs.ingest_game_lines, event_ids=scope, **common)
+
         if a.kind != "props":
-            job = partial(jobs.ingest_game_lines, event_ids=priced, **common)
-            calls.append(_Call(ODDS, "game_lines", GAME_LINES_COST, job))
+            calls.append(
+                _Call(
+                    ODDS,
+                    "game_lines",
+                    GAME_LINES_COST,
+                    game_lines(priced),
+                    games=priced if closing else (),
+                    rescope=game_lines,
+                )
+            )
         if a.kind != "game_lines":
             for event_id in priced:
                 job = partial(jobs.ingest_props, event_id=event_id, markets=self._markets, **common)
-                calls.append(_Call(ODDS, event_id, len(self._markets), job))
+                games = (event_id,) if closing else ()
+                calls.append(_Call(ODDS, event_id, len(self._markets), job, games=games))
         # Never spend what a pending closing needs (I1): closings run in time order.
         reserve = 0
         if a.kind != "closing":
@@ -385,13 +448,25 @@ class CaptureRunner:
         decision = self._guard.allows(sum(c.est for c in calls), reserve)
         if not decision.allowed:
             raise _Skip(decision.reason or "quota")
-        return self._run_calls(calls, notes)
+        return self._run_calls(calls, notes, tips or {})
 
-    def _run_calls(self, calls: list[_Call], notes: list[str]) -> tuple[str, str | None]:
-        """Every call runs; one failing call fails the action but not its siblings."""
+    def _run_calls(
+        self, calls: list[_Call], notes: list[str], tips: dict[str, datetime] | None = None
+    ) -> tuple[str, str | None]:
+        """Every call runs; one failing call fails the action but not its siblings.
+
+        A closing never prices a game at or after its tip (F6): before each call, games
+        whose tip has passed are noted `started` and left out of this and later calls.
+        """
         errors: list[str] = []
         done = 0
-        for call in calls:
+        started: set[str] = set()
+        for planned in calls:
+            call: _Call | None = planned
+            if planned.games and tips:
+                call = self._before_tip(planned, tips, started, notes)
+            if call is None:
+                continue
             try:
                 self._call(call)
                 done += 1
@@ -405,6 +480,23 @@ class CaptureRunner:
         if not done:
             raise _Skip(detail or "skipped")
         return "done", detail
+
+    def _before_tip(
+        self, call: _Call, tips: dict[str, datetime], started: set[str], notes: list[str]
+    ) -> _Call | None:
+        """`call` narrowed to its games still before tip; None when none are."""
+        now = self._clock()
+        live = tuple(k for k in call.games if now < tips[k])
+        for key in call.games:
+            if key not in live and key not in started:
+                started.add(key)
+                notes.append(f"{key}: started")
+        if not live:
+            return None
+        if live == call.games:
+            return call
+        assert call.rescope is not None  # only a multi-game call can lose some of its games
+        return replace(call, games=live, job=call.rescope(live))
 
     def _call(self, call: _Call) -> None:
         if not self._breaker.allow(call.provider):
@@ -444,7 +536,10 @@ class CaptureRunner:
         return {
             "actions": list(self._log),
             "pending": [_entry(a, "pending", None) for a in self._pending],
-            "dropped": sorted(self._dropped.values(), key=lambda e: (e["at"], e["kind"])),
+            "dropped": sorted(
+                [*self._dropped.values(), *self._off_slate.values()],
+                key=lambda e: (e["at"], e["kind"]),
+            ),
             "replans": self._replans,
         }
 

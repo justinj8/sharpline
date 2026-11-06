@@ -27,7 +27,7 @@ from sharpline.db.models import (
     Source,
     Team,
 )
-from sharpline.domain.enums import MarketType, Side, Sport
+from sharpline.domain.enums import EventStatus, MarketType, Side, Sport
 from sharpline.ingest.resolve import EntityResolver, NeedsReview, Resolution, Resolved
 from sharpline.sources.rows import EventRow, InjuryRow, OddsRow, PlayerGameStatRow, ResultRow
 from sharpline.sports.nba.season import season_start_year
@@ -76,6 +76,16 @@ def _market_line(row: OddsRow) -> Decimal | None:
     return row.line
 
 
+def _next_status(stored: str, reported: EventStatus | None) -> str:
+    """The provider's status, except that a final is never downgraded and a game under way
+    never goes back to scheduled (a stale pre-game payload); None leaves it alone."""
+    if reported is None or stored == EventStatus.FINAL:
+        return stored
+    if stored == EventStatus.IN_PROGRESS and reported == EventStatus.SCHEDULED:
+        return stored
+    return reported.value
+
+
 def _moves_tip(stored: datetime, reported: datetime) -> bool:
     """R9 (revised): an earlier tip is always taken, so a closing planned from the stored tip
     never lands after the real one; a later tip only on a real reschedule (> 10 min), since
@@ -110,6 +120,7 @@ class Writer:
                 self._add_xref("event", event.id, row.provider, row.provider_event_id)
             if _moves_tip(event.commence_time, row.commence_time):
                 event.commence_time = row.commence_time
+            event.status = _next_status(event.status, row.status)
             tally.written += 1
         self._s.flush()
         return tally.stats()
@@ -134,6 +145,7 @@ class Writer:
             home_team_id=home_id,
             away_team_id=away_id,
             commence_time=row.commence_time,
+            status=EventStatus.SCHEDULED.value,
         )
         self._s.add(event)
         self._s.flush()
@@ -142,7 +154,8 @@ class Writer:
     # -- odds -----------------------------------------------------------------------------
 
     def odds(self, rows: Iterable[OddsRow], source_id: int, *, is_closing: bool) -> WriteStats:
-        """One market per (event, key, period, player, line); one snapshot per side and book."""
+        """One market per (event, key, period, player, line); one snapshot per side and book.
+        Closing rows captured at or after their event's tip are skipped (F6)."""
         provider = self._source(source_id).provider
         tally = _Tally()
         events: dict[str, Event | None] = {}
@@ -165,6 +178,11 @@ class Writer:
                 )
             event = events[row.provider_event_id]
             if event is None or (row.stat is not None and row.player_name is None):
+                tally.skipped += 1
+                continue
+            if is_closing and row.captured_at >= event.commence_time:
+                # A price seen at or after tip is in-game, never a closing line (F6). Skipped
+                # like any row that cannot be written as asked; the payload stays in sources.
                 tally.skipped += 1
                 continue
             player_id: int | None = None
@@ -303,7 +321,7 @@ class Writer:
                 if source.fetched_at >= self._source(result.source_id).fetched_at:
                     result.home_score, result.away_score = row.home_score, row.away_score
                     result.source_id = source_id
-            self._s.get_one(Event, event_id).status = "final"
+            self._s.get_one(Event, event_id).status = EventStatus.FINAL.value
             tally.written += 1
         self._s.flush()
         return tally.stats()
