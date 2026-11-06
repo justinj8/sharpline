@@ -16,6 +16,7 @@ HEARTBEAT_CRON = "*/5 * * * *"
 OPS_QUEUE = "ops"
 CAPTURE_CRON = "*/15 * * * *"
 CAPTURE_QUEUE = "capture"
+LIVE_NOT_WIRED = "live capture not wired until Task 12"
 
 log = structlog.get_logger()
 
@@ -38,7 +39,7 @@ def plan_and_enqueue(timestamp: int) -> str:
     built from Settings and quota state shared across jobs, which arrive with the CLI
     (Task 12). Until then the tick logs and does nothing, so enabling live mode is inert.
     """
-    log.info("capture.plan_and_enqueue", scheduled_for=timestamp, enqueued=0)
+    log.warning(LIVE_NOT_WIRED, scheduled_for=timestamp, enqueued=0)
     return "noop"
 
 

@@ -3,7 +3,7 @@
 import logging
 from collections.abc import Callable, Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 from pydantic import SecretStr
@@ -17,6 +17,16 @@ log = logging.getLogger(__name__)
 
 # httpx logs full request URLs (including the apiKey query param) at INFO.
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+class OddsFeed(Protocol):
+    """What ingest jobs need from the Odds API; lets a caller wrap the client (metering)."""
+
+    def events(self) -> Fetched: ...
+
+    def game_odds(self, event_ids: Sequence[str] | None = None) -> Fetched: ...
+
+    def event_odds(self, event_id: str, markets: Sequence[str]) -> Fetched: ...
 
 
 class OddsApiError(RuntimeError):

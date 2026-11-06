@@ -33,16 +33,29 @@ class QuotaGuard:
         """Latest provider-reported remaining credits; None until known."""
         return self._remaining
 
-    def allows(self, estimated_cost: int) -> Decision:
-        if self._used + estimated_cost > self._session_cap:
+    @property
+    def floor(self) -> int:
+        return self._floor
+
+    def allows(self, estimated_cost: int, reserve: int = 0) -> Decision:
+        """Allow a call costing `estimated_cost` while keeping `reserve` credits spare.
+
+        The runner reserves the estimates of pending closings for non-closing calls, so
+        earlier refreshes can never spend the credits a closing snapshot needs.
+        """
+        plus = f" + reserve {reserve}" if reserve else ""
+        minus = f" - reserve {reserve}" if reserve else ""
+        if self._used + estimated_cost + reserve > self._session_cap:
             return Decision(
                 False,
-                f"session_cap: used {self._used} + est {estimated_cost} > cap {self._session_cap}",
+                f"session_cap: used {self._used} + est {estimated_cost}{plus}"
+                f" > cap {self._session_cap}",
             )
-        if self._remaining is not None and self._remaining - estimated_cost < self._floor:
+        if self._remaining is not None and self._remaining - estimated_cost - reserve < self._floor:
             return Decision(
                 False,
-                f"floor: remaining {self._remaining} - est {estimated_cost} < floor {self._floor}",
+                f"floor: remaining {self._remaining} - est {estimated_cost}{minus}"
+                f" < floor {self._floor}",
             )
         return Decision(True)
 

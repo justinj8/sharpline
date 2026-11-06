@@ -1,7 +1,16 @@
 import procrastinate.testing
+import structlog.testing
 
 from sharpline.config import Settings
-from sharpline_worker.app import CAPTURE_CRON, CAPTURE_QUEUE, OPS_QUEUE, build_app, worker_queues
+from sharpline_worker.app import (
+    CAPTURE_CRON,
+    CAPTURE_QUEUE,
+    LIVE_NOT_WIRED,
+    OPS_QUEUE,
+    build_app,
+    plan_and_enqueue,
+    worker_queues,
+)
 
 
 def _settings(*, live: bool) -> Settings:
@@ -28,3 +37,11 @@ def test_live_mode_on_registers_capture_job() -> None:
     }
     # The worker must consume the capture queue, or the periodic jobs would pile up.
     assert worker_queues(_settings(live=True)) == [OPS_QUEUE, CAPTURE_QUEUE]
+
+
+def test_live_mode_tick_warns_that_it_is_not_wired() -> None:
+    with structlog.testing.capture_logs() as logs:
+        assert plan_and_enqueue(0) == "noop"
+    assert logs == [
+        {"event": LIVE_NOT_WIRED, "log_level": "warning", "scheduled_for": 0, "enqueued": 0}
+    ]
