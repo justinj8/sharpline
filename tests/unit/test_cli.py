@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from pathlib import Path
 
@@ -14,12 +15,15 @@ from sharpline.cli import app
 runner = CliRunner()
 # Port 1 on loopback refuses at once: a DATABASE_URL that can never be reached.
 UNREACHABLE_DB = "postgresql://sharpline:hunter2-db-pass@127.0.0.1:1/sharpline"
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _commands(*args: str) -> str:
     result = runner.invoke(app, [*args, "--help"])
     assert result.exit_code == 0, result.output
-    return result.output
+    # Rich forces color under CI (GITHUB_ACTIONS/FORCE_COLOR), and the styling splits
+    # "--date" into "-" + "-date" across escape codes; compare plain text.
+    return ANSI_ESCAPE.sub("", result.output)
 
 
 def test_help_lists_every_command() -> None:
