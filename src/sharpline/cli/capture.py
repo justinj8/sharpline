@@ -165,15 +165,20 @@ def _capture(
         with _sigterm_interrupts():
             run_id = runner.run(Sport.NBA, slate, mode="manual")
     except KeyboardInterrupt:
-        _export_interrupted(sessions, runner.run_id)
+        _export_partial(sessions, runner.run_id, slate, "interrupted")
         raise typer.Exit(code=INTERRUPTED_EXIT) from None
+    except Exception:
+        # A failed run (e.g. the database kept dropping) is exported like an interrupted
+        # one, then the error is reported by cli_command.
+        _export_partial(sessions, runner.run_id, slate, "failed")
+        raise
     with sessions() as session:
         run = session.get_one(CaptureRun, run_id)
         typer.echo(f"capture_run_id: {run.id}")
         _summary(run)
         path = export_bundle(session, run.id, DEFAULT_LOCAL_ROOT)  # spec 1.1: every capture
     typer.echo(f"bundle: {path}")
-    typer.echo(f"next: sharpline bundle push {path}")
+    _next_steps(slate, run_id)
 
 
 def _summary(run: CaptureRun) -> None:
@@ -185,22 +190,39 @@ def _summary(run: CaptureRun) -> None:
     typer.echo(f"dropped: {len(run.plan.get('dropped', []))}")
 
 
-def _export_interrupted(sessions: sessionmaker[Session], run_id: int | None) -> None:
-    """Export what this interrupted session captured, so the day is not lost.
+def _next_steps(slate: date, run_id: int) -> None:
+    """The same-day bundle has no finals or box scores yet: the final bundle is exported
+    the morning after, once results are in and reparsed, and that one is pushed (M4)."""
+    typer.echo("next, the morning after the slate:")
+    typer.echo(f"  sharpline results nba --date {slate.isoformat()}")
+    typer.echo("  sharpline reparse")
+    typer.echo(f"  sharpline bundle export {run_id}")
+    typer.echo("  sharpline bundle push <the file bundle export writes>")
 
-    `run_id` is the runner's own run; None means the interrupt landed before its row
-    committed, so there is nothing of this session's to export.
+
+def _export_partial(
+    sessions: sessionmaker[Session], run_id: int | None, slate: date, how: str
+) -> None:
+    """Export what this interrupted or failed session captured, so the day is not lost.
+
+    `run_id` is the runner's own run; None means it stopped before its row committed, so
+    there is nothing of this session's to export. The run id is printed before anything
+    touches the database, which may be what failed; a failed export is a warning.
     """
     if run_id is None:
-        typer.echo("interrupted before the capture run was recorded", err=True)
+        typer.echo(f"{how} before the capture run was recorded", err=True)
         return
-    with sessions() as session:
-        run = session.get_one(CaptureRun, run_id)
-        typer.echo(f"interrupted: capture_run_id {run.id}", err=True)
-        _summary(run)
-        path = export_bundle(session, run.id, DEFAULT_LOCAL_ROOT)
+    typer.echo(f"{how}: capture_run_id {run_id}", err=True)
+    try:
+        with sessions() as session:
+            run = session.get_one(CaptureRun, run_id)
+            _summary(run)
+            path = export_bundle(session, run.id, DEFAULT_LOCAL_ROOT)
+    except Exception as exc:
+        warn(f"could not export capture run {run_id}: {type(exc).__name__}")
+        return
     typer.echo(f"partial bundle: {path}")
-    typer.echo(f"next: sharpline bundle push {path}")
+    _next_steps(slate, run_id)
 
 
 @results_app.command("nba")
@@ -229,16 +251,22 @@ def backfill_nba_stats(
 ) -> None:
     """Fetch whole seasons of NBA box scores: `backfill nba-stats --seasons 2024-25 2025-26`.
 
-    Box scores attach only to stored events (R1); rows without one are counted as skipped
-    and their source is kept, so a later `reparse` can attach them.
+    Box scores attach only to stored events (R1), so each season's game days are first
+    ingested from the ESPN scoreboard (events and finals, free), then the box scores are
+    written, creating the players. Resumable: rerun after a failure and dates whose
+    scoreboard is already stored are skipped.
     """
     bad = [s for s in seasons if not SEASON.fullmatch(s)]
     if bad:
         raise CliError(f"seasons look like 2025-26, got: {', '.join(bad)}")
     settings = load_settings()
     nba = capture_clients.build_nba_stats_client()
+    espn = capture_clients.build_espn_client(settings)
     with database(settings) as sessions:
         for season in seasons:
             with sessions() as session:
-                stats = jobs.ingest_season_player_stats(session, nba, season)
-            typer.echo(f"{season}: {stats_line(stats)}")
+                done = jobs.backfill_season(session, nba, espn, season)
+            typer.echo(
+                f"{season}: game dates {done.dates} (fetched {done.fetched}, skipped"
+                f" {done.skipped}); player stats: {stats_line(done.stats)}"
+            )

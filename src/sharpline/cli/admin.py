@@ -4,7 +4,7 @@ from enum import StrEnum
 from typing import Annotated
 
 import typer
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from sharpline.cli._common import (
     CliError,
@@ -33,6 +33,12 @@ class Provider(StrEnum):
     ODDS_API = ODDS
     ESPN = ESPN
     NBA_STATS = NBA_STATS
+
+
+class Kind(StrEnum):
+    PLAYER = "player"
+    TEAM = "team"
+    EVENT = "event"
 
 
 @review_app.command("list")
@@ -79,8 +85,26 @@ def review_resolve(review_id: int, entity_id: int) -> None:
 
 @review_app.command("reject")
 @cli_command
-def review_reject(review_id: int) -> None:
-    """Close an open review without a match (the provider's rows stay skipped)."""
+def review_reject(
+    review_id: Annotated[int | None, typer.Argument(help="The review to reject.")] = None,
+    reject_all: Annotated[
+        bool, typer.Option("--all", help="Reject every open review matching the filters.")
+    ] = False,
+    provider: Annotated[
+        Provider | None, typer.Option(help="With --all: only this provider.")
+    ] = None,
+    kind: Annotated[Kind | None, typer.Option(help="With --all: only this entity kind.")] = None,
+    yes: Annotated[bool, typer.Option("--yes", help="With --all: do not ask to confirm.")] = False,
+) -> None:
+    """Close open reviews without a match (the provider's rows stay skipped): one by id, or
+    `--all [--provider P] [--kind K]` after a confirmation (`--yes` skips it)."""
+    if (review_id is None) == (not reject_all):
+        raise CliError("give a review id, or --all (with optional --provider/--kind)")
+    if review_id is None:
+        _reject_all(provider, kind, yes=yes)
+        return
+    if provider is not None or kind is not None:
+        raise CliError("--provider/--kind only apply with --all")
     settings = load_settings()
     with database(settings) as sessions, sessions() as session, transaction(session):
         review = session.get(EntityReview, review_id)
@@ -90,6 +114,43 @@ def review_reject(review_id: int) -> None:
             raise CliError(f"review {review_id} is {review.status}, not open")
         review.status = "rejected"
     typer.echo(f"review {review_id} rejected")
+
+
+def _reject_all(provider: Provider | None, kind: Kind | None, *, yes: bool) -> None:
+    where = [EntityReview.status == "open"]
+    if provider is not None:
+        where.append(EntityReview.provider == provider.value)
+    if kind is not None:
+        where.append(EntityReview.entity_kind == kind.value)
+    settings = load_settings()
+    with database(settings) as sessions:
+        with sessions() as session:
+            count = session.scalar(select(func.count()).select_from(EntityReview).where(*where))
+        if not count:
+            typer.echo("no open reviews match")
+            return
+        if not yes:
+            filters = ", ".join(
+                f"{name} {value}"
+                for name, value in (("provider", provider), ("kind", kind))
+                if value is not None
+            )
+            scope = f" ({filters})" if filters else ""
+            typer.confirm(f"reject {count} open review{_s(count)}{scope}?", abort=True)
+        with sessions() as session, transaction(session):
+            rejected = len(
+                session.execute(
+                    update(EntityReview)
+                    .where(*where)
+                    .values(status="rejected")
+                    .returning(EntityReview.id)
+                ).all()
+            )
+    typer.echo(f"rejected {rejected} review{_s(rejected)}")
+
+
+def _s(n: int) -> str:
+    return "" if n == 1 else "s"
 
 
 @cli_command

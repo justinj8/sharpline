@@ -8,6 +8,13 @@ from sharpline.sources.espn import PROVIDER
 from sharpline.sources.fetched import Fetched
 from sharpline.sources.http import HttpClient, utcnow
 
+SCOREBOARD = "scoreboard"
+
+
+def scoreboard_params(slate_date: date) -> dict[str, Any]:
+    """The scoreboard request's params, as recorded in `sources.params`."""
+    return {"dates": slate_date.strftime("%Y%m%d")}
+
 
 class EspnClient:
     def __init__(self, http: HttpClient, clock: Callable[[], datetime] = utcnow) -> None:
@@ -15,7 +22,7 @@ class EspnClient:
         self._clock = clock
 
     def scoreboard(self, slate_date: date) -> Fetched:
-        return self._fetch("scoreboard", {"dates": slate_date.strftime("%Y%m%d")})
+        return self._fetch(SCOREBOARD, scoreboard_params(slate_date))
 
     def injuries(self) -> Fetched:
         return self._fetch("injuries", {})

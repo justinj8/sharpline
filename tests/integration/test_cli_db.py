@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from functools import partial
@@ -12,6 +13,7 @@ from typing import Any
 import httpx
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from typer.testing import CliRunner
 
@@ -28,7 +30,9 @@ from sharpline.db.models import (
     EntityXref,
     Event,
     Player,
+    PlayerGameStat,
     QuotaLedger,
+    Result,
     Source,
     Team,
 )
@@ -241,7 +245,15 @@ def test_capture_runs_a_manual_session(
     assert read_bundle(bundle)[0].capture_run_id == run.id
     shown = Path("var/bundles") / bundle.name
     assert f"bundle: {shown}" in out
-    assert f"next: sharpline bundle push {shown}" in out
+    # M4: the same-day bundle has no finals or box scores yet: never pushed as final
+    assert "sharpline bundle push var/bundles" not in out
+    assert (
+        "next, the morning after the slate:\n"
+        "  sharpline results nba --date 2026-11-12\n"
+        "  sharpline reparse\n"
+        f"  sharpline bundle export {run.id}\n"
+        "  sharpline bundle push <the file bundle export writes>\n"
+    ) in out
 
 
 def _older_interrupted_run(db: sessionmaker[Session]) -> int:
@@ -296,6 +308,59 @@ def test_interrupt_before_the_run_is_recorded_exports_nothing(
     assert not (cli_env / "var" / "bundles").exists()
 
 
+class FlakySlate:
+    """Session factory whose slate reads (`_load_slate`) drop the connection `times` times."""
+
+    def __init__(self, real: sessionmaker[Session], times: int) -> None:
+        self.real, self.times = real, times
+
+    def _maybe_fail(self) -> None:
+        if self.times and sys._getframe(2).f_code.co_name == "_load_slate":
+            self.times -= 1
+            raise OperationalError("SELECT 1", {}, Exception("server closed the connection"))
+
+    def __call__(self, **kw: Any) -> Session:
+        self._maybe_fail()
+        return self.real(**kw)
+
+    def begin(self) -> Any:
+        self._maybe_fail()
+        return self.real.begin()
+
+
+def test_failed_capture_prints_its_run_and_exports_its_bundle(
+    db: sessionmaker[Session], cli_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F5: a run that fails (three dropped connections in a row) is exported like an
+    interrupted one, then the error is reported in one line."""
+    clock, espn = FakeClock(NOW), Espn(GAMES)
+
+    def build(
+        sessions: sessionmaker[Session], settings: Settings, *, cap: int | None = None
+    ) -> CaptureRunner:
+        return CaptureRunner(
+            FlakySlate(sessions, 3),  # type: ignore[arg-type]
+            espn=espn.client(clock),
+            odds=None,
+            guard=QuotaGuard(settings.capture_session_cap, settings.capture_quota_floor),
+            breaker=CircuitBreaker(clock=clock),
+            clock=clock,
+            sleep_until=clock.sleep_until,
+        )
+
+    monkeypatch.setattr(clients, "build_runner", build)
+    result = _invoke("capture", "nba", "--date", "2026-11-12")
+    assert result.exit_code == 1, result.output
+    with db() as session:
+        run = session.scalars(select(CaptureRun)).one()
+    assert run.status == "failed"
+    assert f"failed: capture_run_id {run.id}" in result.output
+    (bundle,) = (cli_env / "var" / "bundles").glob("nba-2026-11-12-*.jsonl.gz")
+    assert read_bundle(bundle)[0].capture_run_id == run.id
+    assert f"partial bundle: {Path('var/bundles') / bundle.name}" in result.output
+    assert result.output.rstrip().endswith("error: database error: OperationalError")
+
+
 # -- results and backfill -----------------------------------------------------------------
 
 
@@ -332,17 +397,75 @@ def test_results_ingests_finals_and_box_scores(
     assert "results: written" in result.output and "player stats: written" in result.output
 
 
+# The fixture game log's day (2025-10-28) as ESPN reports it: home, away, ESPN abbreviations.
+BACKFILL_DAY = date(2025, 10, 28)
+BACKFILL_GAMES = {
+    "b1": (datetime(2025, 10, 29, 2, 30, tzinfo=UTC), "GS", "LAC"),
+    "b2": (datetime(2025, 10, 28, 23, 30, tzinfo=UTC), "MIA", "CHA"),
+    "b3": (datetime(2025, 10, 29, 0, 0, tzinfo=UTC), "MIL", "NY"),
+}
+
+
+class EspnByDate(Espn):
+    """ESPN scoreboards by `dates` param (finals); records each date asked for."""
+
+    def __init__(self, days: dict[date, dict[str, tuple[datetime, str, str]]]) -> None:
+        super().__init__({})
+        self.days = days
+        self.dates: list[str] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        day = request.url.params["dates"]
+        self.dates.append(day)
+        games = self.days.get(datetime.strptime(day, "%Y%m%d").date(), {})
+        board = _scoreboard(games)
+        for event in board["events"]:
+            event["status"]["type"]["name"] = "STATUS_FINAL"
+            for n, competitor in enumerate(event["competitions"][0]["competitors"]):
+                competitor["score"] = str(100 + n)
+        return httpx.Response(200, json=board)
+
+
+def _backfill_providers(monkeypatch: pytest.MonkeyPatch) -> tuple[EspnByDate, NbaStats]:
+    espn, nba = EspnByDate({BACKFILL_DAY: BACKFILL_GAMES}), NbaStats()
+    monkeypatch.setattr(clients, "build_espn_client", lambda settings: espn.client())
+    monkeypatch.setattr(clients, "build_nba_stats_client", lambda: nba.client())
+    return espn, nba
+
+
 def test_backfill_fetches_each_season(
     db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    nba = NbaStats()
-    monkeypatch.setattr(clients, "build_nba_stats_client", lambda: nba.client())
+    espn, nba = _backfill_providers(monkeypatch)
     result = _invoke("backfill", "nba-stats", "--seasons", "2024-25", "2025-26")
     assert result.exit_code == 0, result.output
     assert [c["season"] for c in nba.calls] == ["2024-25", "2025-26"]
     assert all("date_from_nullable" not in c for c in nba.calls)
-    assert "2024-25: written" in result.output and "2025-26: written" in result.output
-    assert _count(db, Source) == 2  # one source per season
+    assert espn.dates == ["20251028"]  # both (fixture) seasons play that day: fetched once
+    assert "2024-25: game dates 1 (fetched 1, skipped 0); player stats: written 5" in result.output
+    assert "2025-26: game dates 1 (fetched 0, skipped 1); player stats: written 5" in result.output
+    assert _count(db, Source) == 3  # one game log per season + one scoreboard
+
+
+def test_backfill_stores_events_before_box_scores_and_resumes(
+    db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F4b: on a fresh database the season's game days are ingested from ESPN first (events
+    and results), so every box score finds its event and creates its player."""
+    espn, _nba = _backfill_providers(monkeypatch)
+    result = _invoke("backfill", "nba-stats", "--seasons", "2025-26")
+    assert result.exit_code == 0, result.output
+    assert espn.dates == ["20251028"]
+    assert "2025-26: game dates 1 (fetched 1, skipped 0)" in result.output
+    assert "player stats: written 5, skipped 0, reviews 0" in result.output
+    assert (_count(db, Event), _count(db, Result), _count(db, Player)) == (3, 3, 5)
+    assert _count(db, PlayerGameStat) == 5
+
+    again = _invoke("backfill", "nba-stats", "--seasons", "2025-26")  # resumable: no refetch
+    assert again.exit_code == 0, again.output
+    assert espn.dates == ["20251028"]
+    assert "2025-26: game dates 1 (fetched 0, skipped 1)" in again.output
+    assert (_count(db, Event), _count(db, PlayerGameStat)) == (3, 5)
 
 
 def test_reparse_passes_provider_and_source_ids(db: sessionmaker[Session]) -> None:
@@ -516,6 +639,87 @@ def test_review_reject(db: sessionmaker[Session], reviews: tuple[int, int, int])
         1,
         "error: entity_review 999999 not found",
     )
+
+
+def _open_reviews(db: sessionmaker[Session]) -> dict[tuple[str, str], int]:
+    """Three open reviews: (provider, kind) -> id."""
+    with db.begin() as session:
+        rows = {
+            ("odds_api", "player"): EntityReview(
+                provider="odds_api",
+                provider_id="A|1",
+                entity_kind="player",
+                raw_name="A",
+                context={},
+                candidates=[],
+            ),
+            ("espn", "player"): EntityReview(
+                provider="espn",
+                provider_id="2:B",
+                entity_kind="player",
+                raw_name="B",
+                context={},
+                candidates=[],
+            ),
+            ("odds_api", "team"): EntityReview(
+                provider="odds_api",
+                provider_id="Seattle",
+                entity_kind="team",
+                raw_name="Seattle",
+                context={},
+                candidates=[],
+            ),
+        }
+        session.add_all(rows.values())
+        session.flush()
+        return {key: review.id for key, review in rows.items()}
+
+
+def _statuses(
+    db: sessionmaker[Session], ids: dict[tuple[str, str], int]
+) -> dict[tuple[str, str], str]:
+    with db() as session:
+        return {key: session.get_one(EntityReview, rid).status for key, rid in ids.items()}
+
+
+def test_review_reject_all_matching_the_filters(db: sessionmaker[Session]) -> None:
+    """F4c: bulk reject, behind a confirmation that --yes skips."""
+    ids = _open_reviews(db)
+    args = ("review", "reject", "--all", "--provider", "odds_api", "--kind", "player")
+    declined = runner.invoke(app, list(args), input="n\n")
+    assert declined.exit_code == 1 and "reject 1 open review" in declined.output
+    assert set(_statuses(db, ids).values()) == {"open"}
+
+    confirmed = runner.invoke(app, list(args), input="y\n")
+    assert confirmed.exit_code == 0, confirmed.output
+    assert "rejected 1 review" in confirmed.output
+    assert _statuses(db, ids) == {
+        ("odds_api", "player"): "rejected",
+        ("espn", "player"): "open",
+        ("odds_api", "team"): "open",
+    }
+
+    rest = _invoke("review", "reject", "--all", "--kind", "player", "--yes")
+    assert (rest.exit_code, rest.output.strip()) == (0, "rejected 1 review")
+    assert _statuses(db, ids)[("espn", "player")] == "rejected"
+    none_left = _invoke("review", "reject", "--all", "--kind", "player", "--yes")
+    assert (none_left.exit_code, none_left.output.strip()) == (0, "no open reviews match")
+    assert _statuses(db, ids)[("odds_api", "team")] == "open"
+
+
+def test_review_reject_needs_an_id_or_all(db: sessionmaker[Session]) -> None:
+    neither = _invoke("review", "reject")
+    assert (neither.exit_code, neither.output.strip()) == (
+        1,
+        "error: give a review id, or --all (with optional --provider/--kind)",
+    )
+    both = _invoke("review", "reject", "7", "--all")
+    assert (both.exit_code, both.output.strip()) == (
+        1,
+        "error: give a review id, or --all (with optional --provider/--kind)",
+    )
+    filters = _invoke("review", "reject", "7", "--provider", "espn")
+    assert filters.exit_code == 1 and "--provider/--kind only apply with --all" in filters.output
 
 
 # -- quota --------------------------------------------------------------------------------

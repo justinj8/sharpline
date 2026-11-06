@@ -12,7 +12,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -22,6 +22,7 @@ from sharpline.db.models import (
     Injury,
     Market,
     OddsSnapshot,
+    Player,
     PlayerGameStat,
     Result,
     Source,
@@ -327,7 +328,12 @@ class Writer:
         return tally.stats()
 
     def player_stats(self, rows: Iterable[PlayerGameStatRow], source_id: int) -> WriteStats:
-        """nba_stats games map to our events by (team, ET game date) (R1); never invented."""
+        """Box scores create or refresh their players first, then map to our events by
+        (team, ET game date) (R1): a row with no stored event is skipped, its player is not.
+
+        nba_stats is the only provider that creates players, so this is how a fresh
+        database gets them; a player's team follows his newest game (trades).
+        """
         provider = self._source(source_id).provider
         tally = _Tally()
         teams = {
@@ -336,10 +342,10 @@ class Writer:
                 select(Team.abbreviation, Team.id).where(Team.sport == Sport.NBA)
             )
         }
+        newest: dict[int, date | None] = {}  # player -> newest game date seen
         for row in rows:
             team_id = teams.get(row.team_abbr)
-            event_id = None if team_id is None else self._game_event(provider, row, team_id)
-            if team_id is None or event_id is None:
+            if team_id is None:
                 tally.skipped += 1
                 continue
             player = self._resolver.player(
@@ -347,6 +353,11 @@ class Writer:
             )
             if not isinstance(player, Resolved):
                 tally.review()
+                continue
+            self._follow_team(player.entity_id, team_id, row.game_date, newest)
+            event_id = self._game_event(provider, row, team_id)
+            if event_id is None:
+                tally.skipped += 1
                 continue
             self._s.execute(
                 insert(PlayerGameStat)
@@ -362,7 +373,28 @@ class Writer:
                 )
             )
             tally.written += 1
+        self._s.flush()
         return tally.stats()
+
+    def _follow_team(
+        self, player_id: int, team_id: int, game_date: date, newest: dict[int, date | None]
+    ) -> None:
+        """Move the player to `team_id` when this game is the newest seen for him: in this
+        batch, or among his stored box scores (so source and row order do not matter)."""
+        if player_id not in newest:
+            latest = self._s.scalar(
+                select(func.max(Event.commence_time))
+                .join(PlayerGameStat, PlayerGameStat.event_id == Event.id)
+                .where(PlayerGameStat.player_id == player_id)
+            )
+            newest[player_id] = None if latest is None else latest.astimezone(EASTERN).date()
+        seen = newest[player_id]
+        if seen is not None and game_date < seen:
+            return
+        newest[player_id] = game_date
+        player = self._s.get_one(Player, player_id)
+        if player.team_id != team_id:
+            player.team_id = team_id
 
     def _game_event(self, provider: str, row: PlayerGameStatRow, team_id: int) -> int | None:
         event_id = self._xref(provider, "event", row.provider_game_id)
