@@ -10,7 +10,7 @@ from pydantic import SecretStr
 
 from sharpline.sources.fetched import QuotaInfo
 from sharpline.sources.http import HttpClient
-from sharpline.sources.odds_api.client import OddsApiClient
+from sharpline.sources.odds_api.client import OddsApiClient, OddsApiError
 from sharpline.sources.odds_api.markets import NBA_PROP_MARKETS
 
 FIXTURES = Path(__file__).parents[3] / "fixtures" / "odds_api"
@@ -106,3 +106,13 @@ def test_http_error_message_redacts_key() -> None:
 def test_estimate_cost() -> None:
     assert OddsApiClient.estimate_cost(6) == 6
     assert OddsApiClient.estimate_cost(3, regions=2) == 6
+
+
+@pytest.mark.parametrize("status", [401, 404, 422, 429, 500])
+def test_http_error_carries_the_status(status: int) -> None:
+    """F8: the runner decides from the status whether a failure counts toward the breaker."""
+    client, _ = _client("nba_events.json", status=status)
+    with pytest.raises(OddsApiError) as exc:
+        client.events()
+    assert exc.value.status == status
+    assert f"HTTP {status}" in str(exc.value)
