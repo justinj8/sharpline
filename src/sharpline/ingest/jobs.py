@@ -104,7 +104,6 @@ def write_player_stats(
     return w.player_stats(parse_player_game_logs(payload), sid)
 
 
-SCHEDULE = Parser(events=scoreboard_events)
 RESULTS = Parser(events=scoreboard_events, rows=write_results)
 INJURIES = Parser(rows=write_injuries)
 ODDS_EVENTS = Parser(events=odds_events)
@@ -144,7 +143,9 @@ def _run(
 def ingest_schedule(
     session: Session, espn: EspnClient, slate_date: date, *, capture_run_id: int | None = None
 ) -> WriteStats:
-    return _run(session, espn.scoreboard(slate_date), SCHEDULE, capture_run_id=capture_run_id)
+    # A refresh that already sees a final records it like the results job (R4), so the live
+    # path and reparse (every scoreboard is RESULTS) stamp final_at the same way.
+    return _run(session, espn.scoreboard(slate_date), RESULTS, capture_run_id=capture_run_id)
 
 
 def ingest_results(

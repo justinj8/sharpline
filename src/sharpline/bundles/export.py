@@ -1,8 +1,9 @@
 """Export one capture session as a slate bundle (spec section 6.1).
 
 A bundle holds three record kinds:
-- `source`: every payload the session fetched, plus the slate date's next-morning results
-  (ESPN scoreboard for that date) and box scores (nba_stats game log for exactly that
+- `source`: every payload the session fetched (Odds API calls via their ledger rows, ESPN
+  injuries via the run's observation window, the slate's ESPN scoreboard by its `dates`
+  param), plus the slate's next-morning box scores (nba_stats game log for exactly that
   date) whenever they exist, so results and player stats travel with their slate;
 - `observation`: every observation of those sources (with `purpose`, so closing flags
   survive without `capture_runs`);
@@ -17,9 +18,10 @@ capturing database (including human review decisions). Team-scoped xref keys (R7
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, or_, select, text
 from sqlalchemy.orm import Session
@@ -43,16 +45,46 @@ from sharpline.sources.nba_stats import PROVIDER as NBA_STATS
 from sharpline.sources.nba_stats.client import ENDPOINT as NBA_GAME_LOG
 
 ESPN_SCOREBOARD = "scoreboard"
+ESPN_INJURIES = "injuries"
+EASTERN = ZoneInfo("America/New_York")
+NEXT_MORNING = time(6, 0)
 
 
 def _iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
-def _source_ids(session: Session, run: CaptureRun) -> list[int]:
-    window = SourceObservation.observed_at >= run.started_at
-    if run.finished_at is not None:
-        window = and_(window, SourceObservation.observed_at <= run.finished_at)
+def observation_window_end(
+    slate_date: date, finished_at: datetime | None, now: datetime
+) -> datetime:
+    """End of the run's observation window.
+
+    A run killed before its `finally` (SIGKILL, OOM, redeploy) keeps `finished_at` NULL; its
+    window then stops at 06:00 ET the next morning (I2), well after the last closing (T-3
+    before the latest tip) and never reaching into the next slate. Next-morning results and
+    box scores are collected by their own slate-keyed rule, not by the window.
+    """
+    if finished_at is not None:
+        return finished_at
+    cutoff = datetime.combine(slate_date + timedelta(days=1), NEXT_MORNING, tzinfo=EASTERN)
+    return min(now, cutoff.astimezone(UTC))
+
+
+def _source_ids(session: Session, run: CaptureRun, now: datetime) -> list[int]:
+    end = observation_window_end(run.slate_date, run.finished_at, now)
+    # Odds API fetches are linked by their ledger rows, and the slate's scoreboard by its
+    # `dates` param; the window adds only the run's other free fetch, ESPN injuries (M2),
+    # so a backfill or results job running alongside the capture does not ride along.
+    window = (
+        select(SourceObservation.source_id)
+        .join(Source, Source.id == SourceObservation.source_id)
+        .where(
+            Source.provider == ESPN,
+            Source.endpoint == ESPN_INJURIES,
+            SourceObservation.observed_at >= run.started_at,
+            SourceObservation.observed_at <= end,
+        )
+    )
     day = run.slate_date
     nba_day = day.strftime("%m/%d/%Y")  # NbaStatsClient's date format
     next_morning = or_(
@@ -70,7 +102,7 @@ def _source_ids(session: Session, run: CaptureRun) -> list[int]:
     )
     queries = (
         select(QuotaLedger.source_id).where(QuotaLedger.capture_run_id == run.id),
-        select(SourceObservation.source_id).where(window),
+        window,
         select(Source.id).where(next_morning),
     )
     ids = {sid for query in queries for sid in session.scalars(query) if sid is not None}
@@ -122,10 +154,12 @@ def _player_records(session: Session, source_ids: list[int]) -> list[dict[str, A
     return sorted(records, key=lambda r: (r["sport"], r["full_name"], str(r["team"])))
 
 
-def export_bundle(session: Session, capture_run_id: int, out_dir: Path) -> Path:
+def export_bundle(
+    session: Session, capture_run_id: int, out_dir: Path, *, now: datetime | None = None
+) -> Path:
     """Write the capture run's bundle into `out_dir` and return its path."""
     run = session.get_one(CaptureRun, capture_run_id)
-    ids = _source_ids(session, run)
+    ids = _source_ids(session, run, now or datetime.now(UTC))
     sources = session.scalars(
         select(Source).where(Source.id.in_(ids)).order_by(Source.fetched_at, Source.id)
     ).all()

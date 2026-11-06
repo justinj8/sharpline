@@ -240,3 +240,14 @@ def test_idle_session_commits_the_fetch_before_a_failing_write(
         assert _count(fresh, SourceObservation) == 1
         assert _count(fresh, QuotaLedger) == 1
         assert _count(fresh, Event) == 0
+
+
+@pytest.mark.usefixtures("teams")
+def test_schedule_seeing_a_final_writes_the_result(db_session: Session) -> None:
+    """Ruling: a schedule refresh that sees a final stamps final_at like the results job (R4),
+    so the live path and reparse (which treats every scoreboard as RESULTS) agree."""
+    stats = ingest_schedule(db_session, _espn("nba_scoreboard_final.json"), date(2026, 11, 2))
+    assert stats == WriteStats(written=4, skipped=0, reviews=0)  # 2 events + 2 results
+    results = db_session.scalars(select(Result)).all()
+    assert len(results) == 2 and all(r.final_at == T0 for r in results)
+    assert set(db_session.scalars(select(Event.status))) == {"final"}

@@ -11,6 +11,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import zlib
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from datetime import date
@@ -83,7 +84,9 @@ def read_bundle(path: Path) -> tuple[BundleManifest, list[dict[str, Any]]]:
         with gzip.open(path, "rb") as f:
             lines = f.read().splitlines(keepends=True)
         head = json.loads(lines[0]) if lines else None
-    except (OSError, EOFError, ValueError) as exc:
+    # gzip.BadGzipFile is an OSError and UnicodeDecodeError/JSONDecodeError are ValueErrors;
+    # a damaged deflate stream raises zlib.error, which is neither (I1).
+    except (OSError, EOFError, ValueError, zlib.error) as exc:
         raise BundleIntegrityError(f"{path.name}: not a readable bundle ({exc})") from exc
     if not isinstance(head, dict):
         raise BundleIntegrityError(f"{path.name}: missing manifest line")
@@ -99,7 +102,12 @@ def read_bundle(path: Path) -> tuple[BundleManifest, list[dict[str, Any]]]:
     body = lines[1:]
     if hashlib.sha256(b"".join(body)).hexdigest() != manifest.content_sha256:
         raise BundleIntegrityError(f"{path.name}: content_sha256 mismatch")
-    records: list[dict[str, Any]] = [json.loads(line) for line in body]
+    try:
+        records: list[dict[str, Any]] = [json.loads(line) for line in body]
+    except ValueError as exc:
+        raise BundleIntegrityError(f"{path.name}: body line is not JSON ({exc})") from exc
+    if not all(isinstance(r, dict) for r in records):
+        raise BundleIntegrityError(f"{path.name}: body line is not a record object")
     if dict(Counter(str(r.get("kind")) for r in records)) != manifest.counts:
         raise BundleIntegrityError(f"{path.name}: record counts do not match the manifest")
     return manifest, records
