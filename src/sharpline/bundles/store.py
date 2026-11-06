@@ -67,7 +67,8 @@ class LocalBundleStore:
             raise FileNotFoundError(f"bundle {name!r} not found in {self.root}")
         dest.mkdir(parents=True, exist_ok=True)
         out = dest / name
-        shutil.copyfile(src, out)
+        if out.resolve() != src.resolve():  # pulling into the store's own directory
+            shutil.copyfile(src, out)
         return out
 
     def list(self) -> list[str]:

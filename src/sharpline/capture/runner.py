@@ -67,6 +67,54 @@ class _Call:
     job: Job
 
 
+@dataclass(frozen=True)
+class SlateEntry:
+    """A stored game of the slate: its plan key, our event id, and whose id the key is."""
+
+    game: SlateGame
+    event_id: int
+    provider: str
+
+
+def load_slate(
+    session: Session,
+    sport: Sport,
+    slate_date: date,
+    *,
+    providers: Sequence[str] = (ESPN, ODDS),
+) -> list[SlateEntry]:
+    """Scheduled games of the slate's ET day, keyed by Odds API id when known (R2).
+
+    Later `providers` win, so with both an event is keyed by its Odds API id when it has
+    one and by its ESPN id otherwise; events with no id from `providers` are left out.
+    """
+    start = datetime.combine(slate_date, time.min, tzinfo=EASTERN)
+    end = datetime.combine(slate_date + timedelta(days=1), time.min, tzinfo=EASTERN)
+    events = session.scalars(
+        select(Event).where(
+            Event.sport == sport.value,
+            Event.commence_time >= start,
+            Event.commence_time < end,
+            Event.status == "scheduled",
+        )
+    ).all()
+    keys: dict[int, tuple[str, str]] = {}
+    for provider in providers:
+        rows = session.execute(
+            select(EntityXref.entity_id, EntityXref.provider_id).where(
+                EntityXref.provider == provider,
+                EntityXref.entity_kind == "event",
+                EntityXref.entity_id.in_([e.id for e in events]),
+            )
+        ).all()
+        keys.update({pk: (provider, provider_id) for pk, provider_id in rows})
+    return [
+        SlateEntry(SlateGame(keys[e.id][1], e.commence_time), e.id, keys[e.id][0])
+        for e in events
+        if e.id in keys
+    ]
+
+
 def _entry(a: CaptureAction, status: str, detail: str | None) -> dict[str, Any]:
     return {
         "at": a.at.isoformat(),
@@ -187,39 +235,15 @@ class CaptureRunner:
     # -- planning -------------------------------------------------------------------------
 
     def _load_slate(self) -> list[SlateGame]:
-        """Scheduled games of the slate's ET day, keyed by Odds API id when known (R2)."""
-        start = datetime.combine(self._slate_date, time.min, tzinfo=EASTERN)
-        end = datetime.combine(self._slate_date + timedelta(days=1), time.min, tzinfo=EASTERN)
         providers = (ESPN, ODDS) if self._odds is not None else (ESPN,)
         with self._sessions() as session:
-            events = session.scalars(
-                select(Event).where(
-                    Event.sport == self._sport.value,
-                    Event.commence_time >= start,
-                    Event.commence_time < end,
-                    Event.status == "scheduled",
-                )
-            ).all()
-            keys: dict[int, tuple[str, str]] = {}
-            for provider in providers:  # later providers win: Odds API ids over ESPN ids
-                rows = session.execute(
-                    select(EntityXref.entity_id, EntityXref.provider_id).where(
-                        EntityXref.provider == provider,
-                        EntityXref.entity_kind == "event",
-                        EntityXref.entity_id.in_([e.id for e in events]),
-                    )
-                ).all()
-                keys.update({pk: (provider, provider_id) for pk, provider_id in rows})
-        games = []
-        for event in events:
-            if event.id not in keys:
-                continue
-            provider, key = keys[event.id]
-            self._keys[key] = event.id
-            if provider == ODDS:
+            entries = load_slate(session, self._sport, self._slate_date, providers=providers)
+        for entry in entries:
+            key = entry.game.provider_event_id
+            self._keys[key] = entry.event_id
+            if entry.provider == ODDS:
                 self._odds_keys.add(key)
-            games.append(SlateGame(key, event.commence_time))
-        return games
+        return [entry.game for entry in entries]
 
     def _replan(self, t: datetime) -> None:
         """Re-plan everything after `t` on the stored slate, fit to what is left (R10):

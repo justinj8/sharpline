@@ -220,6 +220,19 @@ def test_s3_builds_client_without_leaking_secrets() -> None:
 # --- store_from_settings ---------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _no_bundle_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """conftest loads `.env` into os.environ: real bucket settings there must not leak in."""
+    for name in (
+        "BUNDLE_BUCKET",
+        "BUNDLE_ENDPOINT_URL",
+        "BUNDLE_REGION",
+        "BUNDLE_ACCESS_KEY_ID",
+        "BUNDLE_SECRET_ACCESS_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _settings(**kw: Any) -> Settings:
     return Settings(_env_file=None, **kw)
 
