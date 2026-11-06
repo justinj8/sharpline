@@ -11,9 +11,11 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from typing import NoReturn
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
+import requests
 import typer
 from pydantic import ValidationError
 from sqlalchemy import exc as sa_exc
@@ -54,17 +56,36 @@ def cli_command[**P, R](func: Callable[P, R]) -> Callable[P, R]:
             return func(*args, **kwargs)
         except (CliError, BundleIntegrityError, ClosingExceedsBudget) as exc:
             fail(str(exc))
-        except (sa_exc.OperationalError, sa_exc.InterfaceError):
-            # The driver's message names the host; the operator only needs the variable.
-            fail("could not connect to the database (check DATABASE_URL and that it is up)")
+        except (sa_exc.OperationalError, sa_exc.InterfaceError) as exc:
+            if exc.statement is None:  # raised while connecting, before any statement ran
+                # The driver's message names the host; the operator needs only the variable.
+                fail("could not connect to the database (check DATABASE_URL and that it is up)")
+            fail(f"database error: {type(exc).__name__}")
+        except sa_exc.SQLAlchemyError as exc:
+            # DB messages can quote parameters or a URL: the class name only.
+            fail(f"database error: {type(exc).__name__}")
         except httpx.HTTPStatusError as exc:
             # str(exc) carries the full request URL, query string included: status + host only.
             status, host = exc.response.status_code, exc.request.url.host
             fail(f"provider request failed: HTTP {status} from {host}")
+        except requests.RequestException as exc:  # nba_api (stats.nba.com) uses requests
+            fail(f"provider request failed: {_requests_summary(exc)}")
         except PROVIDER_ERRORS as exc:
             fail(f"provider request failed: {type(exc).__name__}: {exc}")
 
     return wrapper
+
+
+def _requests_summary(exc: requests.RequestException) -> str:
+    """Kind, status and host of a requests failure; never its URL or query string."""
+    parts = [type(exc).__name__]
+    if exc.response is not None:
+        parts.append(f"HTTP {exc.response.status_code}")
+    url = exc.request.url if exc.request is not None else None
+    host = urlsplit(url).hostname if isinstance(url, str) else None
+    if host:
+        parts.append(f"from {host}")
+    return " ".join(parts)
 
 
 def load_settings(*, need_database: bool = True) -> Settings:
