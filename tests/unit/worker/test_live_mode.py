@@ -1,4 +1,3 @@
-from collections.abc import Iterator
 from datetime import UTC, date, datetime
 
 import procrastinate.testing
@@ -13,29 +12,19 @@ from sharpline_worker.app import (
     CAPTURE_QUEUE,
     OPS_QUEUE,
     RUN_CAPTURE_TASK,
+    SHUTDOWN_GRACE_S,
     LiveState,
     build_app,
     capture_lock,
     live_tick,
     should_enqueue,
-    worker_concurrency,
-    worker_queues,
+    worker_options,
 )
 
 # 22:00 ET on Thursday 2026-11-12 (03:00 UTC on the 13th): still the 12th's slate.
 TICK = int(datetime(2026, 11, 13, 3, 0, tzinfo=UTC).timestamp())
 SLATE = date(2026, 11, 12)
 TIP = datetime(2026, 11, 13, 3, 30, tzinfo=UTC)
-
-
-@pytest.fixture(autouse=True)
-def _default_structlog() -> Iterator[None]:
-    """capture_logs swaps processors only: a level filter left by another test's
-    configure_logging("WARNING") would drop these info events before they are captured."""
-    saved = structlog.get_config()
-    structlog.reset_defaults()
-    yield
-    structlog.configure(**saved)
 
 
 def _settings(*, live: bool) -> Settings:
@@ -56,8 +45,11 @@ def _periodic(live: bool) -> dict[str, tuple[str, str | None]]:
 def test_live_mode_off_registers_only_heartbeat() -> None:
     assert _periodic(live=False) == {"heartbeat": ("*/5 * * * *", OPS_QUEUE)}
     assert RUN_CAPTURE_TASK not in _app(live=False).tasks
-    assert worker_queues(_settings(live=False)) == [OPS_QUEUE]
-    assert worker_concurrency(_settings(live=False)) == 1
+    assert worker_options(_settings(live=False)) == {
+        "queues": [OPS_QUEUE],
+        "concurrency": 1,
+        "shutdown_graceful_timeout": SHUTDOWN_GRACE_S,
+    }
 
 
 def test_live_mode_on_registers_tick_and_session_job() -> None:
@@ -69,8 +61,17 @@ def test_live_mode_on_registers_tick_and_session_job() -> None:
     assert _app(live=True).tasks[RUN_CAPTURE_TASK].queue == CAPTURE_QUEUE
     # The worker must consume the capture queue, or the jobs would pile up; a session job
     # runs for hours, so a second slot keeps the tick and the heartbeat running beside it.
-    assert worker_queues(_settings(live=True)) == [OPS_QUEUE, CAPTURE_QUEUE]
-    assert worker_concurrency(_settings(live=True)) == 2
+    assert worker_options(_settings(live=True)) == {
+        "queues": [OPS_QUEUE, CAPTURE_QUEUE],
+        "concurrency": 2,
+        "shutdown_graceful_timeout": SHUTDOWN_GRACE_S,
+    }
+
+
+def test_shutdown_does_not_wait_forever_on_a_session_job() -> None:
+    # SIGTERM must not hang on an hours-long capture thread until the host SIGKILLs us;
+    # the orphaned run is recovered at the next startup.
+    assert 0 < SHUTDOWN_GRACE_S <= 30
 
 
 def test_capture_lock_is_per_sport_and_day() -> None:

@@ -16,6 +16,8 @@ from __future__ import annotations
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import procrastinate
@@ -24,6 +26,8 @@ from procrastinate.exceptions import AlreadyEnqueued
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from sharpline.bundles.export import export_bundle
+from sharpline.bundles.store import DEFAULT_LOCAL_ROOT
 from sharpline.capture import clients as capture_clients
 from sharpline.capture.plan import Budget, ClosingExceedsBudget, SlateGame, plan_captures
 from sharpline.capture.runner import load_slate
@@ -41,6 +45,9 @@ RUN_CAPTURE_TASK = "sharpline_worker.app.run_capture_session"
 LIVE_SPORT = Sport.NBA
 # A session that is under way or finished owns the day; failed/interrupted ones may retry.
 BLOCKING_STATUSES = frozenset({"running", "completed"})
+# Seconds SIGTERM waits for running jobs. A capture session never finishes in time, so
+# do not wait for it: its run is recovered (interrupted + exported) at the next startup.
+SHUTDOWN_GRACE_S = 20.0
 
 log = structlog.get_logger()
 
@@ -70,6 +77,44 @@ def capture_lock(slate_date: date, sport: Sport = LIVE_SPORT) -> str:
 
 def should_enqueue(statuses: Collection[str]) -> bool:
     return not BLOCKING_STATUSES.intersection(statuses)
+
+
+def recover_orphaned_runs(
+    sessions: sessionmaker[Session],
+    *,
+    out_dir: Path = DEFAULT_LOCAL_ROOT,
+    now: datetime | None = None,
+) -> list[tuple[int, Path | None]]:
+    """Close live runs a previous worker left `running` (spec section 7) and export them.
+
+    Call at startup, before the worker consumes jobs. ASSUMES A SINGLE WORKER REPLICA
+    (production runs `replicas: 1`): with two workers, one starting up would interrupt
+    the other's session that is genuinely still running. Manual (CLI) runs are left alone.
+    Each run is marked `interrupted` (so the next tick may retry the day) and committed
+    before its partial bundle is exported; a failed export is logged, not raised.
+    """
+    finished = now or datetime.now(UTC)
+    with sessions.begin() as session:
+        orphans = session.scalars(
+            select(CaptureRun)
+            .where(CaptureRun.mode == "live", CaptureRun.status == "running")
+            .order_by(CaptureRun.id)
+        ).all()
+        for run in orphans:
+            run.status = "interrupted"
+            run.finished_at = finished
+        run_ids = [run.id for run in orphans]
+    recovered: list[tuple[int, Path | None]] = []
+    for run_id in run_ids:
+        path: Path | None = None
+        try:
+            with sessions() as session:
+                path = export_bundle(session, run_id, out_dir, now=finished)
+        except Exception as exc:
+            log.error("capture.live.recover_export_failed", run_id=run_id, error=type(exc).__name__)
+        log.warning("capture.live.recovered", run_id=run_id, bundle=str(path) if path else None)
+        recovered.append((run_id, path))
+    return recovered
 
 
 def read_live_state(sessions: sessionmaker[Session], slate_date: date) -> LiveState:
@@ -108,8 +153,8 @@ def live_tick(
         )
     except ClosingExceedsBudget as exc:
         log.warning("capture.live.plan", **fields, games=len(state.games), error=str(exc))
-    blocking = sorted(BLOCKING_STATUSES.intersection(state.statuses))
-    if blocking:
+    if not should_enqueue(state.statuses):
+        blocking = sorted(BLOCKING_STATUSES.intersection(state.statuses))
         log.info("capture.live.skip", **fields, reason=f"run_{blocking[0]}")
         return "skipped"
     try:
@@ -129,6 +174,15 @@ def worker_queues(settings: Settings) -> list[str]:
 def worker_concurrency(settings: Settings) -> int:
     """A live session job runs for hours: a second slot keeps the tick and heartbeat going."""
     return 2 if settings.live_capture else 1
+
+
+def worker_options(settings: Settings) -> dict[str, Any]:
+    """Keyword arguments for `App.run_worker_async`."""
+    return {
+        "queues": worker_queues(settings),
+        "concurrency": worker_concurrency(settings),
+        "shutdown_graceful_timeout": SHUTDOWN_GRACE_S,
+    }
 
 
 def build_app(

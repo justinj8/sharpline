@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 from typer.testing import CliRunner
 
-from sharpline.bundles.format import write_bundle
+from sharpline.bundles.format import read_bundle, write_bundle
 from sharpline.capture import clients
 from sharpline.capture.quota import QuotaGuard
 from sharpline.capture.runner import CaptureRunner
@@ -109,7 +109,14 @@ def db(
     monkeypatch.setenv("DATABASE_URL", bind.url.render_as_string(hide_password=False))
     monkeypatch.setattr(cli_capture, "clock", lambda: NOW)
     # No provider client may be built unless a test opts in.
-    for name in ("build_espn_client", "build_clients", "build_runner", "build_nba_stats_client"):
+    for name in (
+        "build_espn_client",
+        "build_odds_client",
+        "build_clients",
+        "build_runner",
+        "build_nba_stats_client",
+        "OddsApiClient",
+    ):
         monkeypatch.setattr(clients, name, _forbidden(name))
     return db_session_factory
 
@@ -162,6 +169,9 @@ def test_dry_run_cap_override_lists_dropped_actions(db: sessionmaker[Session]) -
 def test_dry_run_fetches_only_the_espn_schedule(
     db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A key is configured, so only the dry run itself keeps the Odds API out: the `db`
+    # fixture makes building any Odds API client (factory or class) raise.
+    monkeypatch.setenv("ODDS_API_KEY", "sk-dummy-not-real")
     espn = Espn(GAMES)
     monkeypatch.setattr(
         clients,
@@ -214,7 +224,7 @@ def _fake_runner(clock: FakeClock, espn: Espn) -> Callable[..., CaptureRunner]:
 
 
 def test_capture_runs_a_manual_session(
-    db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+    db: sessionmaker[Session], cli_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(clients, "build_runner", _fake_runner(FakeClock(NOW), Espn(GAMES)))
     result = _invoke("capture", "nba", "--date", "2026-11-12", "--cap", "90")
@@ -227,22 +237,63 @@ def test_capture_runs_a_manual_session(
     assert f"capture_run_id: {run.id}" in out
     assert "status: completed" in out and "credits: 0 / 90" in out
     assert "skipped" in out  # odds actions: no_api_key
+    (bundle,) = (cli_env / "var" / "bundles").glob("nba-2026-11-12-*.jsonl.gz")
+    assert read_bundle(bundle)[0].capture_run_id == run.id
+    shown = Path("var/bundles") / bundle.name
+    assert f"bundle: {shown}" in out
+    assert f"next: sharpline bundle push {shown}" in out
 
 
-def test_interrupted_capture_exports_a_partial_bundle(
+def _older_interrupted_run(db: sessionmaker[Session]) -> int:
+    with db.begin() as session:
+        older = CaptureRun(
+            sport="nba",
+            slate_date=SLATE,
+            mode="manual",
+            started_at=NOW,
+            finished_at=NOW,
+            status="interrupted",
+            credits_cap=180,
+            plan={},
+        )
+        session.add(older)
+        session.flush()
+        return older.id
+
+
+def test_interrupted_capture_exports_its_own_partial_bundle(
     db: sessionmaker[Session], cli_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    older_id = _older_interrupted_run(db)  # same day: must not be the one exported
     clock = FakeClock(NOW, interrupt=True)
     monkeypatch.setattr(clients, "build_runner", _fake_runner(clock, Espn(GAMES)))
     result = _invoke("capture", "nba", "--date", "2026-11-12")
     assert result.exit_code == 130, result.output
     with db() as session:
-        run = session.scalars(select(CaptureRun)).one()
+        run = session.scalars(select(CaptureRun).where(CaptureRun.id != older_id)).one()
     assert run.status == "interrupted"
     bundles = list((cli_env / "var" / "bundles").glob("nba-2026-11-12-*.jsonl.gz"))
     assert len(bundles) == 1
+    assert read_bundle(bundles[0])[0].capture_run_id == run.id
     assert f"interrupted: capture_run_id {run.id}" in result.output
     assert f"partial bundle: {Path('var/bundles') / bundles[0].name}" in result.output
+
+
+def test_interrupt_before_the_run_is_recorded_exports_nothing(
+    db: sessionmaker[Session], cli_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class NotStarted:
+        run_id: int | None = None
+
+        def run(self, *_a: Any, **_kw: Any) -> int:
+            raise KeyboardInterrupt
+
+    _older_interrupted_run(db)  # an earlier session's run is not this one's to export
+    monkeypatch.setattr(clients, "build_runner", lambda *_a, **_kw: NotStarted())
+    result = _invoke("capture", "nba", "--date", "2026-11-12")
+    assert result.exit_code == 130, result.output
+    assert "interrupted before the capture run was recorded" in result.output
+    assert not (cli_env / "var" / "bundles").exists()
 
 
 # -- results and backfill -----------------------------------------------------------------

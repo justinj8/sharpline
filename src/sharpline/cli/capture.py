@@ -165,12 +165,15 @@ def _capture(
         with _sigterm_interrupts():
             run_id = runner.run(Sport.NBA, slate, mode="manual")
     except KeyboardInterrupt:
-        _export_interrupted(sessions, slate)
+        _export_interrupted(sessions, runner.run_id)
         raise typer.Exit(code=INTERRUPTED_EXIT) from None
     with sessions() as session:
         run = session.get_one(CaptureRun, run_id)
-    typer.echo(f"capture_run_id: {run.id}")
-    _summary(run)
+        typer.echo(f"capture_run_id: {run.id}")
+        _summary(run)
+        path = export_bundle(session, run.id, DEFAULT_LOCAL_ROOT)  # spec 1.1: every capture
+    typer.echo(f"bundle: {path}")
+    typer.echo(f"next: sharpline bundle push {path}")
 
 
 def _summary(run: CaptureRun) -> None:
@@ -182,27 +185,22 @@ def _summary(run: CaptureRun) -> None:
     typer.echo(f"dropped: {len(run.plan.get('dropped', []))}")
 
 
-def _export_interrupted(sessions: sessionmaker[Session], slate: date) -> None:
-    """Export what an interrupted session captured, so the day is not lost."""
+def _export_interrupted(sessions: sessionmaker[Session], run_id: int | None) -> None:
+    """Export what this interrupted session captured, so the day is not lost.
+
+    `run_id` is the runner's own run; None means the interrupt landed before its row
+    committed, so there is nothing of this session's to export.
+    """
+    if run_id is None:
+        typer.echo("interrupted before the capture run was recorded", err=True)
+        return
     with sessions() as session:
-        run = session.scalars(
-            select(CaptureRun)
-            .where(
-                CaptureRun.sport == Sport.NBA.value,
-                CaptureRun.slate_date == slate,
-                CaptureRun.mode == "manual",
-                CaptureRun.status == "interrupted",
-            )
-            .order_by(CaptureRun.id.desc())
-            .limit(1)
-        ).first()
-        if run is None:
-            typer.echo("interrupted before the capture run was recorded", err=True)
-            return
+        run = session.get_one(CaptureRun, run_id)
         typer.echo(f"interrupted: capture_run_id {run.id}", err=True)
         _summary(run)
         path = export_bundle(session, run.id, DEFAULT_LOCAL_ROOT)
     typer.echo(f"partial bundle: {path}")
+    typer.echo(f"next: sharpline bundle push {path}")
 
 
 @results_app.command("nba")

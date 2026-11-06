@@ -180,11 +180,15 @@ class CaptureRunner:
         self._clock = clock
         self._sleep_until = sleep_until
         self._markets = tuple(prop_markets)
+        # The current session's capture_runs id, set once its row has committed: callers
+        # that catch an interrupt export exactly this run (None: nothing was recorded).
+        self.run_id: int | None = None
 
     def run(
         self, sport: Sport, slate_date: date, *, mode: Literal["manual", "live"] = "manual"
     ) -> int:
         """Run one capture session to the end of the slate; returns the capture_run id."""
+        self.run_id = None
         self._sport, self._slate_date = sport, slate_date
         self._start = self._clock()
         self._used0 = self._guard.credits_used
@@ -208,6 +212,7 @@ class CaptureRunner:
             session.add(run)
             session.flush()
             self._run_id = run.id
+        self.run_id = self._run_id
 
         status = "failed"
         try:

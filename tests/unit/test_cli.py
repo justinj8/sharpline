@@ -156,3 +156,50 @@ def test_provider_http_error_names_status_and_host_only(
         "error: provider request failed: HTTP 503 from site.api.espn.com"
     )
     _assert_clean(result.output)
+
+
+def test_database_error_after_connecting_names_only_the_class(
+    cli_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy.exc import OperationalError
+
+    from sharpline.cli import admin
+
+    monkeypatch.setenv("DATABASE_URL", UNREACHABLE_DB)
+
+    def broken(*_a: object, **_kw: object) -> None:
+        # A mid-query failure: the statement is known, the message may carry a URL.
+        raise OperationalError(
+            "SELECT 1", {}, Exception("server closed: postgresql://u:hunter2@127.0.0.1/x")
+        )
+
+    monkeypatch.setattr(admin, "reparse_sources", broken)
+    result = runner.invoke(app, ["reparse"])
+    assert result.exit_code == 1
+    assert result.output.strip() == "error: database error: OperationalError"
+    _assert_clean(result.output)
+
+
+def test_nba_stats_timeout_is_one_clean_line(
+    cli_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import requests
+
+    from sharpline.capture import clients
+    from sharpline.sources.nba_stats.client import NbaStatsClient
+
+    monkeypatch.setenv("DATABASE_URL", UNREACHABLE_DB)  # the fetch fails before any query
+    request = requests.Request("GET", "https://stats.nba.com/stats/leaguegamelog?Season=x")
+
+    def timeout(**_params: object) -> None:
+        raise requests.ReadTimeout("read timed out", request=request.prepare())
+
+    monkeypatch.setattr(
+        clients, "build_nba_stats_client", lambda: NbaStatsClient(endpoint_factory=timeout)
+    )
+    result = runner.invoke(app, ["backfill", "nba-stats", "--seasons", "2025-26"])
+    assert result.exit_code == 1
+    assert result.output.strip() == (
+        "error: provider request failed: ReadTimeout from stats.nba.com"
+    )
+    _assert_clean(result.output)

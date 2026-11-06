@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -11,6 +12,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from sharpline.bundles.format import read_bundle
 from sharpline.capture import clients
 from sharpline.capture.quota import QuotaGuard
 from sharpline.capture.runner import CaptureRunner
@@ -25,6 +27,7 @@ from sharpline_worker.app import (
     RUN_CAPTURE_TASK,
     build_app,
     read_live_state,
+    recover_orphaned_runs,
 )
 
 pytestmark = pytest.mark.integration
@@ -63,19 +66,20 @@ def _espn(clock: Any = lambda: NOW) -> EspnClient:
     return EspnClient(http, clock=clock)
 
 
-def _run(sessions: sessionmaker[Session], status: str) -> None:
+def _run(sessions: sessionmaker[Session], status: str, mode: str = "live") -> int:
     with sessions.begin() as session:
-        session.add(
-            CaptureRun(
-                sport="nba",
-                slate_date=SLATE,
-                mode="live",
-                started_at=NOW,
-                status=status,
-                credits_cap=180,
-                plan={},
-            )
+        run = CaptureRun(
+            sport="nba",
+            slate_date=SLATE,
+            mode=mode,
+            started_at=NOW,
+            status=status,
+            credits_cap=180,
+            plan={},
         )
+        session.add(run)
+        session.flush()
+        return run.id
 
 
 def _settings() -> Settings:
@@ -159,3 +163,35 @@ def test_session_job_runs_the_capture_in_live_mode(
     with db_session_factory() as session:
         run = session.scalars(select(CaptureRun)).one()
     assert (run.id, run.mode, run.status, run.slate_date) == (run_id, "live", "completed", SLATE)
+
+
+def test_startup_recovers_an_orphaned_live_run_and_the_next_tick_retries(
+    db_session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A worker killed mid-session leaves its live run `running`; without recovery every
+    later tick would skip the day for good (spec section 7)."""
+    with db_session_factory() as session:
+        jobs.ingest_schedule(session, _espn(), SLATE)
+    live = _run(db_session_factory, "running")
+    manual = _run(db_session_factory, "running", mode="manual")
+    restart = NOW + timedelta(hours=1)
+
+    recovered = recover_orphaned_runs(db_session_factory, out_dir=tmp_path, now=restart)
+
+    assert [run_id for run_id, _path in recovered] == [live]
+    (path,) = (p for _run_id, p in recovered)
+    assert path is not None and path.parent == tmp_path
+    assert read_bundle(path)[0].capture_run_id == live
+    with db_session_factory() as session:
+        live_run = session.get_one(CaptureRun, live)
+        assert (live_run.status, live_run.finished_at) == ("interrupted", restart)
+        assert session.get_one(CaptureRun, manual).status == "running"  # not ours to touch
+    assert recover_orphaned_runs(db_session_factory, out_dir=tmp_path, now=restart) == []
+
+    with db_session_factory.begin() as session:  # the manual run would block the day too
+        session.get_one(CaptureRun, manual).status = "interrupted"
+    connector = procrastinate.testing.InMemoryConnector()
+    app = build_app(_settings(), connector=connector, session_factory=db_session_factory)
+    assert app.tasks[PLAN_AND_ENQUEUE_TASK](timestamp=int(restart.timestamp())) == "enqueued"
+    (job,) = connector.jobs.values()
+    assert job["args"] == {"sport": "nba", "slate_date": "2026-11-12"}
