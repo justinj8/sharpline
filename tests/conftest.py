@@ -131,6 +131,31 @@ def db_session_factory(nba_template: str) -> Iterator[sessionmaker[Session]]:
             eng.dispose()
 
 
+@pytest.fixture(scope="module")
+def module_session_factory(nba_template: str) -> Iterator[sessionmaker[Session]]:
+    """Like `db_session_factory`, shared by one test module (for expensive setup such as a
+    full capture session that several read-only tests inspect)."""
+    with _throwaway_database(_admin_url(), template=nba_template) as url:
+        eng = create_engine(url)
+        try:
+            yield sessionmaker(bind=eng, expire_on_commit=False)
+        finally:
+            eng.dispose()
+
+
+@pytest.fixture
+def other_db_session(nba_template: str) -> Iterator[Session]:
+    """A session on a second private NBA-seeded database (dropped after the test), e.g. the
+    fresh database a bundle is loaded into. Code under test may commit freely."""
+    with _throwaway_database(_admin_url(), template=nba_template) as url:
+        eng = create_engine(url)
+        try:
+            with Session(eng) as session:
+                yield session
+        finally:
+            eng.dispose()
+
+
 @pytest.fixture(scope="session")
 def engine(pg_url: str) -> Iterator[Engine]:
     eng = create_engine(pg_url)
