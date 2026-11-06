@@ -6,13 +6,27 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from sharpline.domain.enums import Sport
+from sharpline.domain.enums import EventStatus, Sport
 from sharpline.sources.espn import PROVIDER
 from sharpline.sources.rows import EventRow, InjuryRow, ResultRow
 
 log = logging.getLogger(__name__)
 
 FINAL = "STATUS_FINAL"
+
+# ESPN `status.type.name` -> our event status. Names not listed fall back on
+# `status.type.state` ("pre" / "in"); with neither the row carries no status.
+_EVENT_STATUS = {
+    "STATUS_SCHEDULED": EventStatus.SCHEDULED,
+    "STATUS_IN_PROGRESS": EventStatus.IN_PROGRESS,
+    "STATUS_HALFTIME": EventStatus.IN_PROGRESS,
+    "STATUS_END_PERIOD": EventStatus.IN_PROGRESS,
+    FINAL: EventStatus.FINAL,
+    "STATUS_POSTPONED": EventStatus.POSTPONED,
+    "STATUS_CANCELED": EventStatus.CANCELED,
+    "STATUS_SUSPENDED": EventStatus.SUSPENDED,
+}
+_STATE_STATUS = {"pre": EventStatus.SCHEDULED, "in": EventStatus.IN_PROGRESS}
 
 _STATUS_MAP = {
     "out": "out",
@@ -36,6 +50,11 @@ def _competitor(competitors: list[dict[str, Any]], side: str) -> dict[str, Any] 
 _SKIPPABLE = (KeyError, IndexError, TypeError, ValueError, AttributeError, ValidationError)
 
 
+def _event_status(status_type: dict[str, Any]) -> EventStatus | None:
+    mapped = _EVENT_STATUS.get(status_type.get("name", ""))
+    return mapped or _STATE_STATUS.get(status_type.get("state", ""))
+
+
 def _parse_event(ev: dict[str, Any]) -> tuple[EventRow, ResultRow | None] | None:
     competitors = ev["competitions"][0]["competitors"]
     home = _competitor(competitors, "home")
@@ -51,6 +70,7 @@ def _parse_event(ev: dict[str, Any]) -> tuple[EventRow, ResultRow | None] | None
         home_team=home["team"]["abbreviation"],
         away_team=away["team"]["abbreviation"],
         commence_time=_dt(ev["date"]),
+        status=_event_status(ev["status"]["type"]),
     )
     result: ResultRow | None = None
     if ev["status"]["type"]["name"] == FINAL:

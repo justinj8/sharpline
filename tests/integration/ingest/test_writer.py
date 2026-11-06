@@ -20,7 +20,7 @@ from sharpline.db.models import (
     Result,
     Team,
 )
-from sharpline.domain.enums import Side, Sport
+from sharpline.domain.enums import EventStatus, Side, Sport
 from sharpline.ingest.observations import record_fetch
 from sharpline.ingest.resolve import EntityResolver
 from sharpline.ingest.writer import Writer, WriteStats
@@ -449,3 +449,59 @@ def test_tip_moves_earlier_always(db_session: Session) -> None:
         [_event_row("espn", "401", "BOS", "NY", one_earlier)], _source(db_session, "espn", {"e": 2})
     )
     assert event.commence_time == one_earlier
+
+
+def test_event_status_follows_the_provider_but_never_moves_back(db_session: Session) -> None:
+    """F3: the status comes from the row; a final is never downgraded and a game under way
+    never goes back to scheduled. A row with no status (Odds API) leaves it alone."""
+    writer = _writer(db_session)
+
+    def report(status: EventStatus | None, n: int, provider: str = "espn") -> str:
+        row = (
+            _event_row("espn", "401", "BOS", "NY")
+            if provider == "espn"
+            else _event_row()  # the Odds API's evt1: the same game
+        )
+        writer.events(
+            [row.model_copy(update={"status": status})], _source(db_session, provider, {"n": n})
+        )
+        return db_session.scalars(select(Event)).one().status
+
+    assert report(EventStatus.SCHEDULED, 1) == "scheduled"
+    assert report(EventStatus.POSTPONED, 2) == "postponed"
+    assert report(None, 3, provider="odds_api") == "postponed"
+    assert report(EventStatus.SCHEDULED, 4) == "scheduled"  # rescheduled the same day
+    assert report(EventStatus.IN_PROGRESS, 5) == "in_progress"
+    assert report(EventStatus.SCHEDULED, 6) == "in_progress"  # a stale pre-game payload
+    assert report(EventStatus.SUSPENDED, 7) == "suspended"
+    assert report(EventStatus.FINAL, 8) == "final"
+    for n, status in enumerate(
+        (
+            EventStatus.SCHEDULED,
+            EventStatus.POSTPONED,
+            EventStatus.CANCELED,
+            EventStatus.IN_PROGRESS,
+        )
+    ):
+        assert report(status, 9 + n) == "final"
+
+
+def test_closing_snapshot_at_or_after_tip_is_skipped(db_session: Session) -> None:
+    """F6: a closing price captured at or after tip is an in-game price, not a closing line:
+    the writer skips it (the payload stays in `sources`)."""
+    writer = _writer(db_session)
+    src = _source(db_session, "odds_api", {"closing": 1})
+    writer.events([_event_row()], src)
+    rows = [
+        _odds("h2h", Side.HOME, -150, None, book=book).model_copy(update={"captured_at": at})
+        for book, at in (
+            ("draftkings", TIP - timedelta(minutes=1)),
+            ("fanduel", TIP),
+            ("betmgm", TIP + timedelta(minutes=1)),
+        )
+    ]
+    assert writer.odds(rows, src, is_closing=True) == WriteStats(written=1, skipped=2, reviews=0)
+    snaps = db_session.scalars(select(OddsSnapshot)).all()
+    assert [(s.book, s.is_closing) for s in snaps] == [("draftkings", True)]
+    # a regular refresh is not a closing: its rows are written as before
+    assert writer.odds(rows, src, is_closing=False).written == 3
