@@ -25,12 +25,16 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from sharpline.db.models import Source
+from sharpline.db.sources import canonical_hash
 from sharpline.ingest.observations import record_fetch
 from sharpline.ingest.resolve import EntityResolver
 from sharpline.ingest.writer import Writer, WriteStats
-from sharpline.sources.espn.client import EspnClient
+from sharpline.sources.espn import PROVIDER as ESPN
+from sharpline.sources.espn.client import SCOREBOARD, EspnClient, scoreboard_params
 from sharpline.sources.espn.parse import parse_injuries, parse_scoreboard
 from sharpline.sources.fetched import Fetched
 from sharpline.sources.nba_stats.client import NbaStatsClient
@@ -206,10 +210,62 @@ def ingest_player_stats(
     return _run(session, fetched, PLAYER_STATS, capture_run_id=capture_run_id)
 
 
-def ingest_season_player_stats(
-    session: Session, nba: NbaStatsClient, season: str, *, capture_run_id: int | None = None
-) -> WriteStats:
-    """A whole season's box scores (backfill). Games map to stored events only (R1): rows
-    for games with no stored event are skipped, and a later reparse can attach them."""
+@dataclass(frozen=True)
+class SeasonBackfill:
+    """One season's backfill: its game dates, scoreboards fetched or already stored, and
+    the box-score write."""
+
+    season: str
+    dates: int
+    fetched: int
+    skipped: int
+    stats: WriteStats
+
+
+def scoreboard_recorded(session: Session, day: date) -> bool:
+    """Whether an ESPN scoreboard for `day` is already stored (any fetch of it)."""
+    with transaction(session):
+        found = session.scalar(
+            select(Source.id)
+            .where(
+                Source.provider == ESPN,
+                Source.endpoint == SCOREBOARD,
+                Source.params_hash == canonical_hash(scoreboard_params(day)),
+            )
+            .limit(1)
+        )
+    return found is not None
+
+
+def backfill_season(
+    session: Session,
+    nba: NbaStatsClient,
+    espn: EspnClient,
+    season: str,
+    *,
+    capture_run_id: int | None = None,
+) -> SeasonBackfill:
+    """A whole season's box scores (backfill), with the events they belong to.
+
+    Box scores attach only to stored events (R1), so the season's game log is fetched and
+    recorded first, then the ESPN scoreboard of each of its game dates goes through the
+    results job (events, finals, sources), then the box scores are written. Resumable and
+    idempotent: a date whose scoreboard is already stored is skipped, and every unit
+    commits on its own, so a rerun after a failure picks up where it stopped. ESPN calls
+    are paced by the client's HTTP spacing.
+    """
     fetched = nba.player_game_logs(season)
-    return _run(session, fetched, PLAYER_STATS, capture_run_id=capture_run_id)
+    with transaction(session):
+        source_id = record_fetch(session, fetched, capture_run_id=capture_run_id)
+    days = sorted({row.game_date for row in parse_player_game_logs(fetched.payload)})
+    done = skipped = 0
+    for day in days:
+        if scoreboard_recorded(session, day):
+            skipped += 1
+            continue
+        ingest_results(session, espn, day, capture_run_id=capture_run_id)
+        done += 1
+    with transaction(session):
+        writer = Writer(session, EntityResolver(session))
+        stats = PLAYER_STATS.write(writer, fetched.payload, source_id, fetched.fetched_at)
+    return SeasonBackfill(season, len(days), done, skipped, stats)

@@ -5,7 +5,8 @@
     sharpline backfill nba-stats --seasons 2023-24 2024-25 2025-26
     sharpline bundle export <capture_run_id> | push <file> | pull <name> | list | load <file>...
     sharpline reparse [--provider odds_api|espn|nba_stats] [--source-id N ...]
-    sharpline review list | review resolve <review_id> <entity_id> | review reject <review_id>
+    sharpline review list | review resolve <review_id> <entity_id>
+    sharpline review reject <review_id> | review reject --all [--provider P] [--kind K] [--yes]
     sharpline quota
 
 Commands are grouped by module: capture (providers), bundles, admin (review/reparse/quota).

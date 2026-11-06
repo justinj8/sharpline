@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -28,7 +28,7 @@ from sharpline.sources.fetched import Fetched
 from sharpline.sources.nba_stats.parse import parse_player_game_logs
 from sharpline.sources.odds_api.markets import describe_market
 from sharpline.sources.odds_api.parse import parse_odds
-from sharpline.sources.rows import EventRow, InjuryRow, OddsRow, ResultRow
+from sharpline.sources.rows import EventRow, InjuryRow, OddsRow, PlayerGameStatRow, ResultRow
 
 pytestmark = pytest.mark.integration
 
@@ -505,3 +505,89 @@ def test_closing_snapshot_at_or_after_tip_is_skipped(db_session: Session) -> Non
     assert [(s.book, s.is_closing) for s in snaps] == [("draftkings", True)]
     # a regular refresh is not a closing: its rows are written as before
     assert writer.odds(rows, src, is_closing=False).written == 3
+
+
+def _stat(
+    team: str, day: date, game_id: str, player: tuple[str, str] = ("1628369", "Jayson Tatum")
+) -> PlayerGameStatRow:
+    return PlayerGameStatRow(
+        provider_game_id=game_id,
+        provider_player_id=player[0],
+        player_name=player[1],
+        team_abbr=team,
+        game_date=day,
+        matchup=f"{team} vs. OPP",
+        stats={"points": 20.0},
+    )
+
+
+def _player_team(session: Session, nba_id: str) -> str:
+    player_id = _xref(session, "nba_stats", "player", nba_id)
+    assert player_id is not None
+    player = session.get_one(Player, player_id)
+    assert player.team_id is not None
+    return session.get_one(Team, player.team_id).abbreviation
+
+
+def test_player_stats_create_players_even_without_a_stored_event(db_session: Session) -> None:
+    """F4a: box scores bootstrap players (and their teams) on a fresh database; the box-score
+    rows themselves still need a stored event (R1)."""
+    payload = json.loads((FIXTURES / "nba_stats/league_game_log_players.json").read_text())
+    src = _source(db_session, "nba_stats", payload)
+    stats = _writer(db_session).player_stats(parse_player_game_logs(payload), src)
+    assert stats == WriteStats(written=0, skipped=5, reviews=0)
+    assert _count(db_session, PlayerGameStat) == 0
+    assert _count(db_session, Player) == 5
+    assert _player_team(db_session, "1627741") == "GSW"  # Buddy Hield
+    assert _player_team(db_session, "1642949") == "LAC"
+
+
+def test_player_team_follows_the_newest_game(db_session: Session) -> None:
+    """F4a: a trade moves the player to the team of his newest game, whatever order the rows
+    or sources come in; stored box scores count as seen."""
+    writer = _writer(db_session)
+    dec1 = datetime(2025, 12, 2, 0, 30, tzinfo=UTC)  # Dec 1, 19:30 ET
+    writer.events(
+        [_event_row("espn", "d1", "LAL", "DEN", dec1)], _source(db_session, "espn", {"d": 1})
+    )
+    rows = [_stat("LAL", date(2025, 12, 1), "g-dec1"), _stat("BOS", date(2025, 11, 1), "g-nov1")]
+    stats = writer.player_stats(rows, _source(db_session, "nba_stats", {"s": 1}))
+    assert stats == WriteStats(written=1, skipped=1, reviews=0)  # Nov 1 has no stored event
+    assert _player_team(db_session, "1628369") == "LAL"
+
+    older = [_stat("MIA", date(2025, 10, 25), "g-oct25")]  # a later source, an older game
+    writer.player_stats(older, _source(db_session, "nba_stats", {"s": 2}))
+    assert _player_team(db_session, "1628369") == "LAL"  # the stored Dec 1 box score is newer
+
+    newer = [_stat("MIA", date(2026, 1, 5), "g-jan5")]
+    writer.player_stats(newer, _source(db_session, "nba_stats", {"s": 3}))
+    assert _player_team(db_session, "1628369") == "MIA"
+    assert _count(db_session, Player) == 1
+
+
+def test_open_player_reviews_resolve_once_the_player_exists(db_session: Session) -> None:
+    """F4c: a prop or injury quoting a player we did not know yet goes to review; once box
+    scores create the player, the next lookup resolves exactly and closes the review."""
+    writer = _writer(db_session)
+    src = _source(db_session, "odds_api", {"p": 1})
+    writer.events([_event_row()], src)  # evt1: BOS vs NYK
+    props = [_odds("player_points", Side.OVER, -115, "27.5", player="Jayson Tatum")]
+    injury = InjuryRow(
+        team_provider_id="2", player_name="Jayson Tatum", status="out", detail=None, reported_at=T0
+    )
+    assert writer.odds(props, src, is_closing=False).reviews == 1
+    assert writer.injuries([injury], _source(db_session, "espn", {"i": 1})).reviews == 1
+    reviews = db_session.scalars(select(EntityReview)).all()
+    assert len(reviews) == 2 and {r.status for r in reviews} == {"open"}
+
+    writer.player_stats(
+        [_stat("BOS", date(2026, 11, 1), "g1")], _source(db_session, "nba_stats", {"s": 1})
+    )
+    tatum = _xref(db_session, "nba_stats", "player", "1628369")
+    assert (
+        writer.odds(props, _source(db_session, "odds_api", {"p": 2}), is_closing=False).written == 1
+    )
+    assert writer.injuries([injury], _source(db_session, "espn", {"i": 2})).written == 1
+    for review in db_session.scalars(select(EntityReview)):
+        db_session.refresh(review)
+        assert (review.status, review.resolved_entity_id) == ("resolved", tatum)

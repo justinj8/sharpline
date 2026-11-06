@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from rapidfuzz import fuzz, process
-from sqlalchemy import Row, select
+from sqlalchemy import Row, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -80,6 +80,7 @@ class EntityResolver:
         exact = [p.id for p in _same_name(players, raw_name) if team_id in (None, p.team_id)]
         if len(exact) == 1:
             self._add_xref("player", exact[0], provider, provider_id)
+            self._close_review(provider, provider_id, exact[0])
             return Resolved(exact[0])
 
         if not exact and provider == NBA_STATS:
@@ -87,6 +88,7 @@ class EntityResolver:
             self._session.add(player)
             self._session.flush()
             self._add_xref("player", player.id, provider, provider_id)
+            self._close_review(provider, provider_id, player.id)
             return Resolved(player.id)
 
         context = {"sport": str(sport), "team_id": team_id}
@@ -100,6 +102,7 @@ class EntityResolver:
         Xrefs are keyed `name|our_team_id` (R7a): the keys for the event's teams are tried
         first, then a unique name match within those teams, then a unique sport-wide match.
         """
+        review_key = f"{raw_name}|{','.join(str(t) for t in sorted(team_ids))}"
         hits = {
             entity_id
             for team_id in team_ids
@@ -107,7 +110,9 @@ class EntityResolver:
             is not None
         }
         if len(hits) == 1:
-            return Resolved(hits.pop())
+            player_id = hits.pop()
+            self._close_review(provider, review_key, player_id)
+            return Resolved(player_id)
 
         players = self._players(sport)
         same_name = _same_name(players, raw_name)
@@ -117,9 +122,9 @@ class EntityResolver:
             key = team_scoped_key(raw_name, player.team_id)
             if self._xref(provider, "player", key) is None:
                 self._add_xref("player", player.id, provider, key)
+            self._close_review(provider, review_key, player.id)
             return Resolved(player.id)
 
-        review_key = f"{raw_name}|{','.join(str(t) for t in sorted(team_ids))}"
         context = {"sport": str(sport), "team_ids": sorted(team_ids), "scope": TEAM_SCOPE}
         return self._review_player(provider, review_key, raw_name, players, context)
 
@@ -136,6 +141,20 @@ class EntityResolver:
         review.status = "resolved"
         review.resolved_entity_id = entity_id
         self._session.flush()
+
+    def _close_review(self, provider: str, provider_id: str, entity_id: int) -> None:
+        """An open player review whose lookup now resolves exactly is resolved to that player
+        (F4c): e.g. a prop name queued before box scores created the player."""
+        self._session.execute(
+            update(EntityReview)
+            .where(
+                EntityReview.provider == provider,
+                EntityReview.entity_kind == "player",
+                EntityReview.provider_id == provider_id,
+                EntityReview.status == "open",
+            )
+            .values(status="resolved", resolved_entity_id=entity_id)
+        )
 
     def _players(self, sport: Sport) -> Sequence[Row[int, str, int | None]]:
         return self._session.execute(
