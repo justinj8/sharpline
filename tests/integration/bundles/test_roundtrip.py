@@ -316,7 +316,8 @@ def test_captured_slate_is_non_trivial(bundle: tuple[Path, Any]) -> None:
         ("LAC", FINAL_EARLY),
     }
     assert sum(snap["player_game_stats"].values()) == 4
-    assert {(r[0], r[2]) for r in snap["events"]} == {("BOS", TIP1), ("LAC", ESPN_TIP2)}
+    # R9: ESPN said 02:35 first; the Odds API's earlier 02:30 is taken, ESPN's 5 min later is not
+    assert {(r[0], r[2]) for r in snap["events"]} == {("BOS", TIP1), ("LAC", TIP2)}
 
     manifest, records = read_bundle(path)
     assert manifest.sport == "nba" and manifest.slate_date == SLATE
