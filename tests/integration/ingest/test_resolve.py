@@ -38,8 +38,11 @@ def test_seed_is_idempotent(db_session: Session) -> None:
     assert _count(db_session, EntityXref) == 120
 
 
-def test_every_team_resolves_exactly_from_each_provider(db_session: Session) -> None:
-    seed_nba_teams(db_session)
+def test_migrations_alone_resolve_every_team_from_each_provider(db_session: Session) -> None:
+    """A database brought up by `alembic upgrade head` alone (no seed call) knows all 30 NBA
+    teams and their ESPN, Odds API and nba_stats ids (migration 0004)."""
+    assert _count(db_session, Team) == 30
+    assert _count(db_session, EntityXref) == 120
     resolver = EntityResolver(db_session)
     for t in NBA_TEAMS:
         team_id = db_session.scalar(select(Team.id).where(Team.abbreviation == t.abbr))
@@ -53,7 +56,6 @@ def test_every_team_resolves_exactly_from_each_provider(db_session: Session) -> 
 
 
 def test_unknown_team_goes_to_review(db_session: Session) -> None:
-    seed_nba_teams(db_session)
     resolver = EntityResolver(db_session)
     first = resolver.team("odds_api", "Seattle SuperSonics")
     assert isinstance(first, NeedsReview)
@@ -112,7 +114,6 @@ def test_unknown_player_from_odds_api_does_not_create_player(db_session: Session
 
 
 def test_nba_stats_creates_player_and_xref(db_session: Session) -> None:
-    seed_nba_teams(db_session)
     team_id = db_session.scalar(select(Team.id).where(Team.abbreviation == "BOS"))
     resolver = EntityResolver(db_session)
     result = resolver.player(
@@ -126,7 +127,6 @@ def test_nba_stats_creates_player_and_xref(db_session: Session) -> None:
 
 
 def test_team_filter_narrows_match(db_session: Session) -> None:
-    seed_nba_teams(db_session)
     bos, nyk = db_session.scalars(
         select(Team.id).where(Team.abbreviation.in_(["BOS", "NYK"])).order_by(Team.abbreviation)
     )
@@ -174,7 +174,6 @@ def test_review_upsert_refreshes_only_that_review(db_session: Session) -> None:
 
 
 def test_event_scoped_player_review_resolves_to_a_team_scoped_xref(db_session: Session) -> None:
-    seed_nba_teams(db_session)
     bos, nyk = (
         db_session.scalar(select(Team.id).where(Team.abbreviation == a)) for a in ("BOS", "NYK")
     )

@@ -21,13 +21,12 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from dotenv import load_dotenv
-from sqlalchemy import Engine, create_engine, make_url, text
+from sqlalchemy import Engine, create_engine, make_url, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from sharpline.db.models import Event, Market, Player, Team
 from sharpline.db.session import normalize_database_url
 from sharpline.db.sources import record_source
-from sharpline.sports.nba.teams import seed_nba_teams
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -105,18 +104,10 @@ def private_engine(migrated_template: str) -> Iterator[Engine]:
 
 
 @pytest.fixture(scope="session")
-def nba_template(migrated_template: str) -> Iterator[str]:
-    """Name of a migrated database with the NBA teams (and their xrefs) seeded, idle."""
-    with _throwaway_database(_admin_url(), template=migrated_template) as url:
-        eng = create_engine(url)
-        try:
-            with Session(eng) as session, session.begin():
-                seed_nba_teams(session)
-        finally:
-            eng.dispose()  # a template must have no open connections when it is copied
-        name = make_url(url).database
-        assert name is not None
-        yield name
+def nba_template(migrated_template: str) -> str:
+    """Name of an idle migrated database with the NBA teams (and their xrefs): migration 0004
+    seeds them, so this is the migrated template itself."""
+    return migrated_template
 
 
 @pytest.fixture
@@ -190,10 +181,8 @@ def seeded_source(db_session: Session) -> int:
 
 @pytest.fixture
 def seeded_market(db_session: Session) -> int:
-    home = Team(sport="nba", name="Boston Celtics", abbreviation="BOS")
-    away = Team(sport="nba", name="New York Knicks", abbreviation="NYK")
-    db_session.add_all([home, away])
-    db_session.flush()
+    home = db_session.scalars(select(Team).where(Team.abbreviation == "BOS")).one()
+    away = db_session.scalars(select(Team).where(Team.abbreviation == "NYK")).one()
     event = Event(
         sport="nba",
         season=2026,

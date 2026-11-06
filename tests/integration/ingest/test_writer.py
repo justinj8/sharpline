@@ -29,7 +29,6 @@ from sharpline.sources.nba_stats.parse import parse_player_game_logs
 from sharpline.sources.odds_api.markets import describe_market
 from sharpline.sources.odds_api.parse import parse_odds
 from sharpline.sources.rows import EventRow, InjuryRow, OddsRow, ResultRow
-from sharpline.sports.nba.teams import seed_nba_teams
 
 pytestmark = pytest.mark.integration
 
@@ -116,12 +115,6 @@ def _xref(session: Session, provider: str, kind: str, pid: str) -> int | None:
     )
 
 
-@pytest.fixture
-def teams(db_session: Session) -> None:
-    seed_nba_teams(db_session)
-
-
-@pytest.mark.usefixtures("teams")
 def test_events_create_event_with_season_and_xref(db_session: Session) -> None:
     src = _source(db_session, "odds_api", {"e": 1})
     stats = _writer(db_session).events([_event_row()], src)
@@ -133,7 +126,6 @@ def test_events_create_event_with_season_and_xref(db_session: Session) -> None:
     assert _xref(db_session, "odds_api", "event", "evt1") == event.id
 
 
-@pytest.mark.usefixtures("teams")
 def test_events_converge_across_providers_within_two_hours(db_session: Session) -> None:
     writer = _writer(db_session)
     espn = _event_row("espn", "401", "BOS", "NY", TIP + timedelta(minutes=10))
@@ -149,7 +141,6 @@ def test_events_converge_across_providers_within_two_hours(db_session: Session) 
     assert _count(db_session, Event) == 2
 
 
-@pytest.mark.usefixtures("teams")
 def test_events_unresolved_team_is_skipped_and_counted(db_session: Session) -> None:
     row = _event_row(home="Seattle SuperSonics")
     stats = _writer(db_session).events([row], _source(db_session, "odds_api", {"e": 1}))
@@ -158,7 +149,6 @@ def test_events_unresolved_team_is_skipped_and_counted(db_session: Session) -> N
     assert _count(db_session, EntityReview) == 1
 
 
-@pytest.mark.usefixtures("teams")
 def test_writer_is_idempotent_for_events_and_results(db_session: Session) -> None:
     writer = _writer(db_session)
     src = _source(db_session, "espn", {"final": 1})
@@ -172,7 +162,6 @@ def test_writer_is_idempotent_for_events_and_results(db_session: Session) -> Non
     assert _count(db_session, EntityXref) == 120 + 1  # seeded team xrefs + one event xref
 
 
-@pytest.mark.usefixtures("teams")
 def test_results_final_at_comes_from_source_and_never_moves_later(db_session: Session) -> None:
     writer = _writer(db_session)
     t1, t2 = T0 + timedelta(hours=6), T0 + timedelta(hours=7)
@@ -199,7 +188,6 @@ def test_results_final_at_comes_from_source_and_never_moves_later(db_session: Se
     assert stats == WriteStats(written=0, skipped=1, reviews=0)
 
 
-@pytest.mark.usefixtures("teams")
 def test_writer_odds_keeps_per_book_lines_as_separate_markets(db_session: Session) -> None:
     tatum = _player(db_session, "Jayson Tatum", "BOS")
     payload = json.loads((FIXTURES / "odds_api" / "nba_event_props.json").read_text())
@@ -223,7 +211,6 @@ def test_writer_odds_keeps_per_book_lines_as_separate_markets(db_session: Sessio
     assert _xref(db_session, "odds_api", "player", f"Jayson Tatum|{bos}") == tatum
 
 
-@pytest.mark.usefixtures("teams")
 def test_spread_pair_lands_in_one_market_with_home_perspective_line(db_session: Session) -> None:
     src = _source(db_session, "odds_api", {"e": 1})
     writer = _writer(db_session)
@@ -252,7 +239,6 @@ def test_spread_pair_lands_in_one_market_with_home_perspective_line(db_session: 
     ]
 
 
-@pytest.mark.usefixtures("teams")
 def test_writer_odds_is_idempotent_per_source(db_session: Session) -> None:
     src = _source(db_session, "odds_api", {"e": 1})
     writer = _writer(db_session)
@@ -264,7 +250,6 @@ def test_writer_odds_is_idempotent_per_source(db_session: Session) -> None:
     assert _count(db_session, OddsSnapshot) == 2
 
 
-@pytest.mark.usefixtures("teams")
 def test_writer_odds_skips_unresolved_player_and_counts_review(db_session: Session) -> None:
     src = _source(db_session, "odds_api", {"e": 1})
     writer = _writer(db_session)
@@ -282,7 +267,6 @@ def test_writer_odds_skips_unresolved_player_and_counts_review(db_session: Sessi
     assert (review.provider, review.provider_id) == ("odds_api", f"Nobody Here|{bos},{nyk}")
 
 
-@pytest.mark.usefixtures("teams")
 def test_props_resolve_within_the_events_teams_then_sport_wide(db_session: Session) -> None:
     celtic = _player(db_session, "Marcus Morris", "BOS")
     _player(db_session, "Marcus Morris", "LAL")
@@ -299,7 +283,6 @@ def test_props_resolve_within_the_events_teams_then_sport_wide(db_session: Sessi
     assert all(s.is_closing for s in db_session.scalars(select(OddsSnapshot)))
 
 
-@pytest.mark.usefixtures("teams")
 def test_injuries_resolve_with_the_injury_team(db_session: Session) -> None:
     hawk = _player(db_session, "Marcus Morris", "ATL")
     _player(db_session, "Marcus Morris", "BOS")
@@ -333,7 +316,6 @@ def test_injuries_resolve_with_the_injury_team(db_session: Session) -> None:
     assert _xref(db_session, "espn", "player", "1:Marcus Morris") == hawk
 
 
-@pytest.mark.usefixtures("teams")
 def test_injury_without_reported_at_uses_source_fetched_at(db_session: Session) -> None:
     _player(db_session, "Jayson Tatum", "BOS")
     src = _source(db_session, "espn", {"i": 2}, T0)
@@ -348,7 +330,6 @@ def test_injury_without_reported_at_uses_source_fetched_at(db_session: Session) 
     assert db_session.scalars(select(Injury.reported_at)).one() == T0
 
 
-@pytest.mark.usefixtures("teams")
 def test_player_stats_map_to_events_by_team_and_eastern_date(db_session: Session) -> None:
     writer = _writer(db_session)
     # 2025-10-29 02:30Z is 22:30 on 10-28 in New York: same ET game_date as the fixture
@@ -372,7 +353,6 @@ def test_player_stats_map_to_events_by_team_and_eastern_date(db_session: Session
     assert stat.event_id == gsw_lac_id and stat.stats["points"] == 2.0
 
 
-@pytest.mark.usefixtures("teams")
 def test_same_name_players_on_different_teams_stay_distinct(db_session: Session) -> None:
     celtic = _player(db_session, "Marcus Morris", "BOS")
     laker = _player(db_session, "Marcus Morris", "LAL")
@@ -411,7 +391,6 @@ def test_same_name_players_on_different_teams_stay_distinct(db_session: Session)
     assert _xref(db_session, "espn", "player", "13:Marcus Morris") == laker
 
 
-@pytest.mark.usefixtures("teams")
 def test_reparsing_an_older_source_never_reverts_a_newer_score(db_session: Session) -> None:
     writer = _writer(db_session)
     t1, t2 = T0 + timedelta(hours=6), T0 + timedelta(hours=7)
@@ -428,7 +407,6 @@ def test_reparsing_an_older_source_never_reverts_a_newer_score(db_session: Sessi
     assert (result.home_score, result.final_at, result.source_id) == (111, t1, new)
 
 
-@pytest.mark.usefixtures("teams")
 def test_tip_moves_only_beyond_ten_minutes(db_session: Session) -> None:
     writer = _writer(db_session)
     writer.events(
