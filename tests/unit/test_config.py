@@ -55,3 +55,15 @@ def test_settings_requires_database_url(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.delenv("DATABASE_URL", raising=False)
     with pytest.raises(ValidationError):
         Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_empty_secret_env_counts_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgres://u:p@h/d")
+    monkeypatch.setenv("ODDS_API_KEY", "")
+    assert Settings(_env_file=None).odds_api_key is None  # type: ignore[call-arg]
+
+
+def test_capture_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgres://u:p@h/d")
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert (s.live_capture, s.capture_session_cap, s.capture_quota_floor) == (False, 180, 20)

@@ -92,6 +92,13 @@ jobs:
       # The Railway start/pre-deploy commands call these binaries directly.
       - name: Production venv has the deploy entrypoints
         run: test -x .venv/bin/uvicorn && test -x .venv/bin/alembic && test -x .venv/bin/python
-      # Resolves alembic.ini -> db/migrations offline (no database needed).
-      - name: Migration chain resolves to 0002
-        run: .venv/bin/alembic heads | grep -q "^0002 (head)"
+      # Resolves alembic.ini -> db/migrations offline (no database needed): exactly one head,
+      # and it is the revision of the newest migration file, so adding a migration keeps it green.
+      - name: Migration chain has one head, the newest migration
+        run: |
+          heads="$(.venv/bin/alembic heads)"
+          newest="$(ls db/migrations/versions/[0-9]*.py | sort | tail -n 1)"
+          revision="$(sed -nE 's/^revision: str = "([^"]+)".*/\1/p' "$newest")"
+          echo "alembic heads: ${heads//$'\n'/, }; newest file: $newest (revision $revision)"
+          test "$(printf '%s\n' "$heads" | grep -c .)" -eq 1
+          test -n "$revision" && test "$heads" = "$revision (head)"

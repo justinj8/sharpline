@@ -32,3 +32,15 @@ class Side(StrEnum):
     UNDER = "UNDER"
     YES = "YES"
     NO = "NO"
+
+
+class EventStatus(StrEnum):
+    """`events.status`. Providers report it; the writer never moves a final back, nor a game
+    under way back to scheduled."""
+
+    SCHEDULED = "scheduled"
+    IN_PROGRESS = "in_progress"
+    FINAL = "final"
+    POSTPONED = "postponed"
+    CANCELED = "canceled"
+    SUSPENDED = "suspended"

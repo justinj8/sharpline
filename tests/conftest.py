@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -20,10 +21,10 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from dotenv import load_dotenv
-from sqlalchemy import Engine, create_engine, make_url, text
-from sqlalchemy.orm import Session
+from sqlalchemy import Engine, create_engine, make_url, select, text
+from sqlalchemy.orm import Session, sessionmaker
 
-from sharpline.db.models import Event, Market, Team
+from sharpline.db.models import Event, Market, Player, Team
 from sharpline.db.session import normalize_database_url
 from sharpline.db.sources import record_source
 
@@ -40,16 +41,18 @@ def _alembic_config(url: str) -> Config:
     return cfg
 
 
-@pytest.fixture(scope="session")
-def pg_url() -> Iterator[str]:
-    admin_url = os.environ.get("TEST_DATABASE_URL")
-    if not admin_url:
-        pytest.skip("TEST_DATABASE_URL not set")
+@contextmanager
+def _throwaway_database(admin_url: str, template: str | None = None) -> Iterator[str]:
+    """Create a uniquely named database, yield its URL, drop it.
 
+    It is migrated to head, or copied server-side from `template` (an already migrated
+    database nobody is connected to), which is much faster than migrating again.
+    """
     name = f"sharpline_test_{uuid.uuid4().hex[:8]}"
     admin = create_engine(normalize_database_url(admin_url), isolation_level="AUTOCOMMIT")
+    clone = f' TEMPLATE "{template}"' if template else ""
     with admin.connect() as conn:
-        conn.execute(text(f'CREATE DATABASE "{name}"'))
+        conn.execute(text(f'CREATE DATABASE "{name}"{clone}'))
 
     url = (
         make_url(normalize_database_url(admin_url))
@@ -57,12 +60,91 @@ def pg_url() -> Iterator[str]:
         .render_as_string(hide_password=False)
     )
     try:
-        command.upgrade(_alembic_config(url), "head")
+        if template is None:
+            command.upgrade(_alembic_config(url), "head")
         yield url
     finally:
         with admin.connect() as conn:
             conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
         admin.dispose()
+
+
+def _admin_url() -> str:
+    admin_url = os.environ.get("TEST_DATABASE_URL")
+    if not admin_url:
+        pytest.skip("TEST_DATABASE_URL not set")
+    return admin_url
+
+
+@pytest.fixture(scope="session")
+def pg_url() -> Iterator[str]:
+    with _throwaway_database(_admin_url()) as url:
+        yield url
+
+
+@pytest.fixture(scope="session")
+def migrated_template() -> Iterator[str]:
+    """Name of a migrated database that is never connected to, cloned by `private_engine`."""
+    with _throwaway_database(_admin_url()) as url:
+        name = make_url(url).database
+        assert name is not None
+        yield name
+
+
+@pytest.fixture
+def private_engine(migrated_template: str) -> Iterator[Engine]:
+    """A private migrated database for tests that must really commit (dropped afterwards),
+    so their committed rows never reach the shared per-run test database."""
+    with _throwaway_database(_admin_url(), template=migrated_template) as url:
+        eng = create_engine(url)
+        try:
+            yield eng
+        finally:
+            eng.dispose()
+
+
+@pytest.fixture(scope="session")
+def nba_template(migrated_template: str) -> str:
+    """Name of an idle migrated database with the NBA teams (and their xrefs): migration 0004
+    seeds them, so this is the migrated template itself."""
+    return migrated_template
+
+
+@pytest.fixture
+def db_session_factory(nba_template: str) -> Iterator[sessionmaker[Session]]:
+    """Sessions for code that commits its own work (the capture runner), on a private copy
+    of the NBA-seeded template that is dropped after the test: no table cleanup needed."""
+    with _throwaway_database(_admin_url(), template=nba_template) as url:
+        eng = create_engine(url)
+        try:
+            yield sessionmaker(bind=eng, expire_on_commit=False)
+        finally:
+            eng.dispose()
+
+
+@pytest.fixture(scope="module")
+def module_session_factory(nba_template: str) -> Iterator[sessionmaker[Session]]:
+    """Like `db_session_factory`, shared by one test module (for expensive setup such as a
+    full capture session that several read-only tests inspect)."""
+    with _throwaway_database(_admin_url(), template=nba_template) as url:
+        eng = create_engine(url)
+        try:
+            yield sessionmaker(bind=eng, expire_on_commit=False)
+        finally:
+            eng.dispose()
+
+
+@pytest.fixture
+def other_db_session(nba_template: str) -> Iterator[Session]:
+    """A session on a second private NBA-seeded database (dropped after the test), e.g. the
+    fresh database a bundle is loaded into. Code under test may commit freely."""
+    with _throwaway_database(_admin_url(), template=nba_template) as url:
+        eng = create_engine(url)
+        try:
+            with Session(eng) as session:
+                yield session
+        finally:
+            eng.dispose()
 
 
 @pytest.fixture(scope="session")
@@ -99,10 +181,8 @@ def seeded_source(db_session: Session) -> int:
 
 @pytest.fixture
 def seeded_market(db_session: Session) -> int:
-    home = Team(sport="nba", name="Boston Celtics", abbreviation="BOS")
-    away = Team(sport="nba", name="New York Knicks", abbreviation="NYK")
-    db_session.add_all([home, away])
-    db_session.flush()
+    home = db_session.scalars(select(Team).where(Team.abbreviation == "BOS")).one()
+    away = db_session.scalars(select(Team).where(Team.abbreviation == "NYK")).one()
     event = Event(
         sport="nba",
         season=2026,
@@ -122,3 +202,35 @@ def seeded_market(db_session: Session) -> int:
     db_session.add(market)
     db_session.flush()
     return market.id
+
+
+@pytest.fixture
+def seeded_player(db_session: Session) -> int:
+    player = Player(sport="nba", full_name="Jayson Tatum")
+    db_session.add(player)
+    db_session.flush()
+    return player.id
+
+
+def settings_env_names() -> set[str]:
+    """Every environment variable `Settings` can read, derived from its fields."""
+    from sharpline.config import Settings
+
+    names: set[str] = set()
+    for field_name, field in Settings.model_fields.items():
+        names.add(field_name.upper())
+        alias = field.validation_alias
+        choices = getattr(alias, "choices", [alias] if isinstance(alias, str) else [])
+        names.update(str(c).upper() for c in choices)
+    return names
+
+
+@pytest.fixture
+def cli_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Run the CLI with no inherited settings: conftest loaded `.env` into os.environ (real
+    API keys, bucket credentials, the dev DATABASE_URL), so drop every Settings variable and
+    work from an empty directory with no `.env`. Tests set what they need."""
+    for name in settings_env_names():
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(tmp_path)
+    return tmp_path

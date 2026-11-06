@@ -11,7 +11,16 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "alembic>=1.13",
     "structlog>=24.4",
+    "typer==0.27.3",
+    "rapidfuzz==3.14.6",
+    "nba-api==1.12.0",
+    "boto3==1.43.123",
+    "httpx==0.28.1",
+    "requests==2.34.2",  # imported by the CLI directly (nba_api errors), not only via nba-api
 ]
+
+[project.scripts]
+sharpline = "sharpline.cli:app"
 
 [build-system]
 requires = ["hatchling"]
@@ -39,6 +48,7 @@ dev = [
     "ruff>=0.7",
     "pre-commit>=4.0",
     "python-dotenv>=1.2.4",
+    "hypothesis==6.170.14",
 ]
 
 [tool.ruff]
@@ -61,6 +71,7 @@ packages = ["sharpline", "sharpline_api", "sharpline_worker"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["integration: needs a Postgres reachable via TEST_DATABASE_URL"]
+addopts = "--import-mode=importlib"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 filterwarnings = [
