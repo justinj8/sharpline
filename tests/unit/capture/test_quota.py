@@ -73,3 +73,21 @@ def test_guard_reserve_counts_against_floor() -> None:
     assert not decision.allowed
     assert decision.reason is not None and decision.reason.startswith("floor")
     assert guard.floor == 20 and guard.session_cap == 180
+
+
+def test_seed_counts_the_slate_days_earlier_credits_against_the_cap() -> None:
+    """F5: the cap is per slate day: credits earlier runs spent that day are already used."""
+    guard = QuotaGuard(session_cap=180, floor=20)
+    guard.seed(used=170, remaining=None)
+    assert guard.credits_used == 170 and guard.remaining is None
+    assert guard.allows(10).allowed
+    assert not guard.allows(11).allowed
+
+
+def test_seed_starts_from_the_last_known_remaining() -> None:
+    guard = QuotaGuard(session_cap=180, floor=20)
+    guard.seed(used=0, remaining=26)
+    assert guard.remaining == 26
+    assert guard.allows(6).allowed and not guard.allows(7).allowed
+    guard.charge(QuotaInfo(last=3, used=477, remaining=23), 3)
+    assert (guard.credits_used, guard.remaining) == (3, 23)  # provider headers win from here

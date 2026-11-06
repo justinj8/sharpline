@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -13,6 +14,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from sharpline.capture.quota import QuotaGuard
@@ -99,6 +101,8 @@ class World:
         self.espn_status: dict[
             str, str
         ] = {}  # ESPN status names by Odds API id (default scheduled)
+        self.quota_total = 500  # the account's credits, for x-requests-remaining
+        self.events_headers = True  # False: the free event list reports no quota headers
         self._used = 0
 
     @property
@@ -167,11 +171,46 @@ class World:
         headers = {
             "x-requests-last": str(cost),
             "x-requests-used": str(self._used),
-            "x-requests-remaining": str(500 - self._used),
+            "x-requests-remaining": str(self.quota_total - self._used),
         }
         if self.omit_last:
             del headers["x-requests-last"]
+        if path.endswith("/events") and not self.events_headers:
+            headers = {}
         return httpx.Response(200, json=body, headers=headers)
+
+
+class FlakySessions:
+    """A session factory whose session opens from one runner method (`caller`) raise a
+    dropped-connection OperationalError `times` times, once the clock reaches `armed_from`."""
+
+    def __init__(
+        self,
+        real: sessionmaker[Session],
+        caller: str,
+        times: int,
+        *,
+        clock: FakeClock,
+        armed_from: datetime,
+    ) -> None:
+        self.real, self.caller, self.times = real, caller, times
+        self.clock, self.armed_from = clock, armed_from
+        self.raised: list[datetime] = []
+
+    def _maybe_fail(self) -> None:
+        caller = sys._getframe(2).f_code.co_name
+        if self.times and caller == self.caller and self.clock() >= self.armed_from:
+            self.times -= 1
+            self.raised.append(self.clock())
+            raise OperationalError("SELECT 1", {}, Exception("server closed the connection"))
+
+    def __call__(self, **kw: Any) -> Session:
+        self._maybe_fail()
+        return self.real(**kw)
+
+    def begin(self) -> Any:
+        self._maybe_fail()
+        return self.real.begin()
 
 
 def _http(base: str, handler: Callable[[httpx.Request], httpx.Response]) -> HttpClient:
@@ -181,7 +220,7 @@ def _http(base: str, handler: Callable[[httpx.Request], httpx.Response]) -> Http
 
 
 def _runner(
-    sessions: sessionmaker[Session],
+    sessions: sessionmaker[Session] | FlakySessions,
     clock: FakeClock,
     world: World,
     *,
@@ -200,7 +239,7 @@ def _runner(
         else None
     )
     return CaptureRunner(
-        sessions,
+        sessions,  # type: ignore[arg-type]
         espn=espn,
         odds=odds,
         guard=QuotaGuard(session_cap=cap, floor=20),
@@ -578,3 +617,114 @@ def test_closing_rechecks_the_tip_before_each_odds_call(sessions: sessionmaker[S
     assert closing_props == []
     for odds_id in ("evt1", "evt2"):
         assert _closing_snapshots(sessions, _event_pk(sessions, odds_id)) == []
+
+
+def test_transient_db_errors_in_persist_are_survived(sessions: sessionmaker[Session]) -> None:
+    """F5: a dropped connection while recording progress is logged and retried next time."""
+    clock = FakeClock(_hm(23, 0))
+    world = World(clock, {"evt1": TIP1, "evt2": TIP2})
+    flaky = FlakySessions(sessions, "_persist", 2, clock=clock, armed_from=_hm(23, 30))
+    run_id = _runner(flaky, clock, world).run(Sport.NBA, SLATE)
+
+    assert len(flaky.raised) == 2  # after two consecutive actions
+    run = _run(sessions, run_id)
+    assert run.status == "completed"
+    assert all(e["status"] == "done" for e in _entries(run)), _entries(run)
+    assert [e["status"] for e in _entries(run, "closing")] == ["done", "done"]
+    assert run.credits_used == 48  # as without the errors
+
+
+def test_transient_db_errors_in_replan_keep_the_previous_plan(
+    sessions: sessionmaker[Session],
+) -> None:
+    """F5: the 00:00 refresh cannot re-read the slate twice running; the session goes on
+    with its previous plan and the third try (after the next action) succeeds."""
+    clock = FakeClock(_hm(23, 0))
+    world = World(clock, {"evt1": TIP1, "evt2": TIP2})
+    flaky = FlakySessions(sessions, "_load_slate", 2, clock=clock, armed_from=_hm(0, 0))
+    run_id = _runner(flaky, clock, world).run(Sport.NBA, SLATE)
+
+    assert len(flaky.raised) == 2
+    run = _run(sessions, run_id)
+    assert run.status == "completed"
+    assert all(e["status"] == "done" for e in _entries(run)), _entries(run)
+    actions = [(e["at"], e["kind"], tuple(e["event_ids"])) for e in _entries(run)]
+    assert len(actions) == len(set(actions))  # nothing ran twice after the late re-plan
+    closings = [(e["at"], e["event_ids"]) for e in _entries(run, "closing")]
+    assert closings == [(_iso(_hm(23, 57)), ["evt1"]), (_iso(_hm(2, 27)), ["evt2"])]
+    for odds_id in ("evt1", "evt2"):
+        assert _closing_snapshots(sessions, _event_pk(sessions, odds_id))
+
+
+@pytest.mark.parametrize(
+    ("caller", "armed_from"), [("_load_slate", (0, 0)), ("_persist", (23, 30))]
+)
+def test_three_consecutive_db_failures_fail_the_run(
+    sessions: sessionmaker[Session], caller: str, armed_from: tuple[int, int]
+) -> None:
+    """F5: the third consecutive failure ends the run; it is still marked failed, from a
+    fresh session."""
+    clock = FakeClock(_hm(23, 0))
+    world = World(clock, {"evt1": TIP1, "evt2": TIP2})
+    flaky = FlakySessions(sessions, caller, 3, clock=clock, armed_from=_hm(*armed_from))
+    runner = _runner(flaky, clock, world)
+    with pytest.raises(OperationalError):
+        runner.run(Sport.NBA, SLATE)
+
+    assert len(flaky.raised) == 3
+    run = _run(sessions)
+    assert runner.run_id == run.id
+    assert run.status == "failed" and run.finished_at == clock()
+
+
+def _interrupted_first_run(sessions: sessionmaker[Session], world: World) -> CaptureRun:
+    """An earlier session of the same slate day, stopped at 23:45 after 15 credits."""
+    clock = FakeClock(_hm(23, 0))
+    world.clock = clock
+
+    def ctrl_c() -> None:
+        raise KeyboardInterrupt
+
+    clock.hooks[_hm(23, 45)] = ctrl_c
+    with pytest.raises(KeyboardInterrupt):
+        _runner(sessions, clock, world).run(Sport.NBA, SLATE)
+    first = _run(sessions)
+    assert (first.status, first.credits_used) == ("interrupted", 15)
+    return first
+
+
+def test_session_cap_is_per_slate_day(sessions: sessionmaker[Session]) -> None:
+    """F5: a second session of the day starts with the first one's credits already used."""
+    world = World(FakeClock(_hm(23, 0)), {"evt1": TIP1, "evt2": TIP2})
+    first = _interrupted_first_run(sessions, world)
+    clock = FakeClock(_hm(23, 45))
+    world.clock = clock
+    run_id = _runner(sessions, clock, world, cap=40).run(Sport.NBA, SLATE)
+
+    second = _run(sessions, run_id)
+    assert second.status == "completed"
+    # 40 - 15 = 25 left at the start: start lines 3 + two closings 9 + 9 (start props, T-90
+    # props and the 00:45 lines dropped by budget); at 01:45, 13 left fits lines 3 + closing 9
+    assert second.credits_used == 24 and first.credits_used + second.credits_used <= 40
+    dropped = {(d["kind"], d["reason"], d["detail"]) for d in second.plan["dropped"]}
+    assert ("props", "session_start", "budget") in dropped
+    assert [e["status"] for e in _entries(second, "closing")] == ["done", "done"]
+
+
+def test_guard_starts_from_the_last_known_remaining(sessions: sessionmaker[Session]) -> None:
+    """F5: with no quota headers yet this session, the plan already respects the floor
+    against the remaining credits the ledger last recorded."""
+    world = World(FakeClock(_hm(23, 0)), {"evt1": TIP1, "evt2": TIP2})
+    world.quota_total = 60
+    _interrupted_first_run(sessions, world)  # the ledger now says 45 remaining
+    world.events_headers = False
+    clock = FakeClock(_hm(23, 45))
+    world.clock = clock
+    run_id = _runner(sessions, clock, world, cap=1000).run(Sport.NBA, SLATE)
+
+    second = _run(sessions, run_id)
+    # 45 remaining - floor 20 = 25 to spend at the start: start lines 3 + two closings 18
+    # (start props dropped); at 01:45 the headers say 33 left: 13 more fits lines + closing
+    assert second.credits_used == 24
+    dropped = {(d["kind"], d["reason"], d["detail"]) for d in second.plan["dropped"]}
+    assert ("props", "session_start", "budget") in dropped

@@ -3,12 +3,15 @@
 A session starts with a schedule refresh, plans from the stored slate, then works through
 the actions in time order, sleeping in between. Every schedule refresh (session start, then
 hourly) re-reads the slate and re-plans the remaining actions against the remaining budget
-(R10). Each action ends `done`, `skipped` or `failed` in `capture_runs.plan`.
+(R10). Each action ends `done`, `skipped` or `failed` in `capture_runs.plan`. The session
+cap is per slate day (earlier runs' credits count), and a transient database error in the
+runner's own bookkeeping is retried; three in a row fail the run.
 """
 
 from __future__ import annotations
 
 import bisect
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
@@ -17,7 +20,8 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import exc as sa_exc
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from sharpline.capture.plan import (
@@ -30,7 +34,7 @@ from sharpline.capture.plan import (
     plan_captures,
 )
 from sharpline.capture.quota import QuotaGuard
-from sharpline.db.models import CaptureRun, EntityXref, Event
+from sharpline.db.models import CaptureRun, EntityXref, Event, QuotaLedger
 from sharpline.domain.enums import EventStatus, Sport
 from sharpline.ingest import jobs
 from sharpline.ingest.writer import WriteStats
@@ -42,11 +46,17 @@ from sharpline.sources.odds_api.client import PROVIDER as ODDS
 from sharpline.sources.odds_api.client import OddsApiClient, OddsApiError
 from sharpline.sources.odds_api.markets import NBA_PROP_MARKETS
 
+log = logging.getLogger(__name__)
+
 EASTERN = ZoneInfo("America/New_York")
 REFRESH_EVERY = timedelta(hours=1)
 CLOSING_LEAD = timedelta(minutes=3)
 _UNCAPPED = 10**9  # plan everything first, then fit what remains into what is left
 _ODDS_KINDS = frozenset({"game_lines", "props", "closing"})
+# Transient database errors in the runner's own bookkeeping (re-plan, progress): retried at
+# the next iteration; this many in a row fail the run (F5).
+MAX_DB_FAILURES = 3
+DB_RETRY_AFTER = timedelta(minutes=1)  # wait before retrying a session-start plan
 # Only these mean the provider is unhealthy (spec 7); parse/resolve/write errors do not.
 PROVIDER_ERRORS: tuple[type[Exception], ...] = (OddsApiError, httpx.HTTPError, ProviderUnavailable)
 
@@ -146,6 +156,13 @@ def _entry(a: CaptureAction, status: str, detail: str | None) -> dict[str, Any]:
     }
 
 
+def is_transient_db_error(exc: BaseException) -> bool:
+    """A dropped or unusable connection, worth retrying on a fresh one."""
+    if isinstance(exc, sa_exc.OperationalError | sa_exc.InterfaceError):
+        return True
+    return isinstance(exc, sa_exc.DBAPIError) and exc.connection_invalidated
+
+
 def _gone_reason(status: str) -> str:
     """Why a game left the slate (or a closing skips it), from its stored status."""
     if status in (EventStatus.SCHEDULED, EventStatus.POSTPONED):
@@ -219,7 +236,6 @@ class CaptureRunner:
         self.run_id = None
         self._sport, self._slate_date = sport, slate_date
         self._start = self._clock()
-        self._used0 = self._guard.credits_used
         self._log: list[dict[str, Any]] = []
         self._pending: list[CaptureAction] = []
         self._dropped: dict[CaptureAction, dict[str, Any]] = {}
@@ -229,7 +245,11 @@ class CaptureRunner:
         self._replans = 0
         self._keys: dict[str, int] = {}  # plan event id -> events.id
         self._odds_keys: set[str] = set()  # plan event ids that are Odds API ids
+        self._executed: set[CaptureAction] = set()
+        self._db_failures: dict[str, int] = {}  # per bookkeeping step, consecutive
         with self._sessions.begin() as session:
+            self._seed_guard(session)
+            self._used0 = self._guard.credits_used
             run = CaptureRun(
                 sport=sport.value,
                 slate_date=slate_date,
@@ -249,24 +269,76 @@ class CaptureRunner:
         try:
             start = CaptureAction(self._start, "schedule", (), 0, "session_start")
             self._execute(start)
-            self._replan(start.at)
-            self._persist("running")
-            while self._pending:
-                action = self._pending[0]
-                if action.at > self._clock():
-                    self._sleep_until(action.at)
-                self._execute(action)
-                self._pending.remove(action)
-                if action.kind == "schedule":
-                    self._replan(action.at)
-                self._persist("running")
+            self._executed.add(start)
+            replan_due = not self._db_step("re-plan", partial(self._replan, start.at))
+            self._db_step("persist", partial(self._persist, "running"))
+            while self._pending or replan_due:
+                replan_at: datetime | None = None
+                if self._pending:
+                    action = self._pending[0]
+                    if action.at > self._clock():
+                        self._sleep_until(action.at)
+                    self._execute(action)
+                    self._executed.add(action)
+                    self._pending.remove(action)
+                    if action.kind == "schedule":
+                        replan_at = action.at
+                    elif replan_due:  # the last re-plan failed: retry, from now on
+                        replan_at = self._clock()
+                else:  # no plan at all yet (the session-start re-plan failed): wait, retry
+                    self._sleep_until(self._clock() + DB_RETRY_AFTER)
+                    replan_at = self._clock()
+                if replan_at is not None:
+                    replan_due = not self._db_step("re-plan", partial(self._replan, replan_at))
+                self._db_step("persist", partial(self._persist, "running"))
             status = "completed"
         except KeyboardInterrupt:
             status = "interrupted"
             raise
         finally:
-            self._persist(status, finished=True)
+            self._persist(status, finished=True)  # its own (fresh) session, like every persist
         return self._run_id
+
+    def _db_step(self, what: str, step: Callable[[], None]) -> bool:
+        """Run a bookkeeping step; a transient DB error is logged and reported as False (the
+        caller keeps its previous plan and retries next iteration) until the same step has
+        failed MAX_DB_FAILURES times in a row, which re-raises and fails the run. Counted per
+        step: a persist that works between two failed re-plans does not reset the re-plan's
+        count."""
+        try:
+            step()
+        except sa_exc.SQLAlchemyError as exc:
+            if not is_transient_db_error(exc):
+                raise
+            failures = self._db_failures[what] = self._db_failures.get(what, 0) + 1
+            log.warning(
+                "capture run %s: %s failed (%s), %d in a row",
+                self._run_id,
+                what,
+                type(exc).__name__,
+                failures,
+            )
+            if failures >= MAX_DB_FAILURES:
+                raise
+            return False
+        self._db_failures[what] = 0
+        return True
+
+    def _seed_guard(self, session: Session) -> None:
+        """The cap is per slate day (F5): count what earlier runs of this sport and slate
+        date spent, and start from the provider's last reported remaining credits."""
+        used = session.scalar(
+            select(func.coalesce(func.sum(CaptureRun.credits_used), 0)).where(
+                CaptureRun.sport == self._sport.value, CaptureRun.slate_date == self._slate_date
+            )
+        )
+        remaining = session.scalar(
+            select(QuotaLedger.remaining)
+            .where(QuotaLedger.provider == ODDS, QuotaLedger.remaining.is_not(None))
+            .order_by(QuotaLedger.observed_at.desc(), QuotaLedger.id.desc())
+            .limit(1)
+        )
+        self._guard.seed(used=int(used or 0), remaining=remaining)
 
     # -- planning -------------------------------------------------------------------------
 
@@ -283,7 +355,8 @@ class CaptureRunner:
 
     def _replan(self, t: datetime) -> None:
         """Re-plan everything after `t` on the stored slate, fit to what is left (R10):
-        cap - credits used, and no more than remaining - floor once the provider said so.
+        cap - credits used on this slate day, and no more than remaining - floor once known.
+        Actions already executed are never planned again (a late retry after a DB error).
 
         Planning from the session start keeps the 30-min/hourly grid and the planner's
         reasons (so its drop order) stable; actions before `t` are history and discarded.
@@ -291,14 +364,16 @@ class CaptureRunner:
         slate = self._load_slate()
         self._drop_off_slate(t, {g.provider_event_id for g in slate})
         raw = plan_captures(slate, self._start, Budget(_UNCAPPED, len(self._markets)))
-        remaining = [a for a in raw.actions if a.kind != "schedule" and a.at >= t]
+        remaining = [
+            a for a in raw.actions if a.kind != "schedule" and a.at >= t and a not in self._executed
+        ]
         last_closing = max((a.at for a in raw.actions if a.kind == "closing"), default=None)
         refresh = self._start + REFRESH_EVERY
         while last_closing is not None and refresh < last_closing:
             if refresh > t:
                 remaining.append(CaptureAction(refresh, "schedule", (), 0, "hourly"))
             refresh += REFRESH_EVERY
-        cap_left = self._guard.session_cap - self._used()
+        cap_left = self._guard.session_cap - self._guard.credits_used  # per slate day (F5)
         budget = cap_left  # the guard's floor binds re-plans too (I1)
         if self._guard.remaining is not None:
             budget = min(budget, self._guard.remaining - self._guard.floor)
