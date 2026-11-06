@@ -38,7 +38,6 @@ from sharpline.sources.espn.client import EspnClient
 from sharpline.sources.http import HttpClient
 from sharpline.sources.nba_stats.client import NbaStatsClient
 from sharpline.sources.odds_api.client import OddsApiClient
-from sharpline.sports.nba.teams import seed_nba_teams
 
 pytestmark = pytest.mark.integration
 
@@ -78,12 +77,6 @@ def _team(session: Session, abbr: str) -> int:
     return team_id
 
 
-@pytest.fixture
-def teams(db_session: Session) -> None:
-    seed_nba_teams(db_session)
-
-
-@pytest.mark.usefixtures("teams")
 def test_ingest_game_lines_end_to_end_with_fixture(db_session: Session) -> None:
     stats = ingest_game_lines(db_session, _odds("nba_game_odds.json"))
     # 2 events + 22 snapshots (fanduel's Under at +50 is dropped by the parser)
@@ -112,7 +105,6 @@ def test_ingest_game_lines_end_to_end_with_fixture(db_session: Session) -> None:
     assert not any(s.is_closing for s in db_session.scalars(select(OddsSnapshot)))
 
 
-@pytest.mark.usefixtures("teams")
 def test_closing_flag_persisted_via_observation_purpose(db_session: Session) -> None:
     db_session.add(Player(sport="nba", full_name="Jayson Tatum", team_id=_team(db_session, "BOS")))
     db_session.flush()
@@ -125,7 +117,6 @@ def test_closing_flag_persisted_via_observation_purpose(db_session: Session) -> 
     assert len(snaps) == 4 and all(s.is_closing for s in snaps)
 
 
-@pytest.mark.usefixtures("teams")
 def test_ingest_schedule_then_results(db_session: Session) -> None:
     stats = ingest_schedule(db_session, _espn("nba_scoreboard.json"), date(2026, 11, 4))
     assert stats == WriteStats(written=2, skipped=0, reviews=0)
@@ -140,7 +131,6 @@ def test_ingest_schedule_then_results(db_session: Session) -> None:
     assert len(finals) == 2
 
 
-@pytest.mark.usefixtures("teams")
 def test_ingest_injuries(db_session: Session) -> None:
     db_session.add_all(
         [
@@ -155,7 +145,6 @@ def test_ingest_injuries(db_session: Session) -> None:
     assert _count(db_session, EntityReview) == 5
 
 
-@pytest.mark.usefixtures("teams")
 def test_ingest_player_stats_derives_season_and_maps_events(db_session: Session) -> None:
     db_session.add(
         Event(
@@ -186,7 +175,6 @@ def test_ingest_player_stats_derives_season_and_maps_events(db_session: Session)
     assert _count(db_session, PlayerGameStat) == 2
 
 
-@pytest.mark.usefixtures("teams")
 def test_parser_error_still_records_the_fetch(
     db_session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -202,7 +190,6 @@ def test_parser_error_still_records_the_fetch(
     assert _count(db_session, Event) == 0  # the write step rolled back as a unit
 
 
-@pytest.mark.usefixtures("teams")
 def test_closing_fetch_with_an_unchanged_payload_still_writes_closing_snapshots(
     db_session: Session,
 ) -> None:
@@ -242,7 +229,6 @@ def test_idle_session_commits_the_fetch_before_a_failing_write(
         assert _count(fresh, Event) == 0
 
 
-@pytest.mark.usefixtures("teams")
 def test_schedule_seeing_a_final_writes_the_result(db_session: Session) -> None:
     """Ruling: a schedule refresh that sees a final stamps final_at like the results job (R4),
     so the live path and reparse (which treats every scoreboard as RESULTS) agree."""

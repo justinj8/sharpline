@@ -63,8 +63,22 @@ NBA_TEAMS: tuple[NbaTeam, ...] = (
 )
 
 
+def team_xrefs(team: NbaTeam) -> tuple[tuple[str, str], ...]:
+    """(provider, provider_id) pairs that identify `team`: ESPN by abbreviation and by id."""
+    return (
+        (ESPN, team.espn_abbr),
+        (ESPN, team.espn_id),
+        (ODDS_API, team.odds_api_name),
+        (NBA_STATS, str(team.nba_api_id)),
+    )
+
+
 def seed_nba_teams(session: Session) -> int:
-    """Upsert the teams and their provider xrefs; idempotent. Flushes, never commits."""
+    """Upsert the teams and their provider xrefs; idempotent. Flushes, never commits.
+
+    Migration 0004 seeds the same rows (insert-only) from `NBA_TEAMS` and `team_xrefs`, so
+    every migrated database resolves teams exactly; this also repoints moved xrefs.
+    """
     for t in NBA_TEAMS:
         team = session.scalar(
             select(Team).where(Team.sport == Sport.NBA, Team.abbreviation == t.abbr)
@@ -75,12 +89,7 @@ def seed_nba_teams(session: Session) -> int:
         else:
             team.name = t.name
         session.flush()
-        for provider, provider_id in (
-            (ESPN, t.espn_abbr),
-            (ESPN, t.espn_id),
-            (ODDS_API, t.odds_api_name),
-            (NBA_STATS, str(t.nba_api_id)),
-        ):
+        for provider, provider_id in team_xrefs(t):
             xref = session.scalar(
                 select(EntityXref).where(
                     EntityXref.provider == provider,
