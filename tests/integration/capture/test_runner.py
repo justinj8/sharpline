@@ -93,6 +93,7 @@ class World:
         # x-requests-last overrides by ("lines" | "props", call time)
         self.costs: dict[tuple[str, datetime], int] = {}
         self.omit_last = False  # drop the x-requests-last header (proxies, caches)
+        self.props_status: int | None = None  # answer every props call with this HTTP status
         self._used = 0
 
     @property
@@ -136,6 +137,8 @@ class World:
         if path.endswith("/events"):
             body = [self._retimed(e) for e in _events() if e["id"] in self.tips]
             cost = 0
+        elif "/events/" in path and self.props_status is not None:
+            return httpx.Response(self.props_status, json={"message": "Event not found"})
         elif "/events/" in path:
             # Props carry no books here: player resolution is covered by the writer tests.
             event_id = path.split("/")[-2]
@@ -488,3 +491,28 @@ def test_interrupt_marks_run_interrupted(sessions: sessionmaker[Session]) -> Non
     assert run.plan["pending"] and run.plan["pending"][0]["at"] == _iso(_hm(23, 45))
     assert all(p["status"] == "pending" for p in run.plan["pending"])
     assert run.credits_used == 15
+
+
+@pytest.mark.parametrize("status", [404, 422])
+def test_delisted_event_errors_do_not_open_the_breaker(
+    sessions: sessionmaker[Session], status: int
+) -> None:
+    """F8: a 404 (delisted event) or 422 fails its action; it is not a provider outage."""
+    tip = _hm(23, 10)  # closing at 23:07, inside the breaker's 10-min cooldown
+    clock = FakeClock(_hm(23, 0))
+    world = World(clock, {"evt1": tip, "evt2": tip, "evt3": tip})
+    world.props_status = status
+    run_id = _runner(sessions, clock, world).run(Sport.NBA, SLATE)
+
+    run = _run(sessions, run_id)
+    [props] = _entries(run, "props")  # three calls, three client errors in a row
+    assert props["status"] == "failed"
+    assert (
+        props["detail"].count("OddsApiError: odds api ") == 3
+        and f"HTTP {status}" in props["detail"]
+    )
+    assert not any("circuit_open" in (e["detail"] or "") for e in _entries(run))
+    [closing] = _entries(run, "closing")
+    assert closing["status"] == "failed"  # its props 404 again, but its game lines ran
+    for odds_id in ("evt1", "evt2"):
+        assert _closing_snapshots(sessions, _event_pk(sessions, odds_id))

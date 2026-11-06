@@ -30,7 +30,15 @@ class OddsFeed(Protocol):
 
 
 class OddsApiError(RuntimeError):
-    """Odds API request failed; the message never contains the API key."""
+    """Odds API request failed; the message never contains the API key.
+
+    `status` is the HTTP status of the failed response (None when unknown), so callers can
+    tell a provider outage (401, 429, 5xx) from a request it rejected (404, 422).
+    """
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 def _int_header(headers: httpx.Headers, name: str) -> int | None:
@@ -83,8 +91,9 @@ class OddsApiClient:
             response = self._http.get(endpoint, request_params)
         except httpx.HTTPStatusError as exc:
             # str(exc) embeds the request URL, which carries the key.
+            status = exc.response.status_code
             raise OddsApiError(
-                f"odds api {endpoint} failed with HTTP {exc.response.status_code}"
+                f"odds api {endpoint} failed with HTTP {status}", status=status
             ) from None
         quota = QuotaInfo(
             last=_int_header(response.headers, "x-requests-last"),

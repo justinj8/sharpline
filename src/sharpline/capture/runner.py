@@ -50,7 +50,22 @@ _ODDS_KINDS = frozenset({"game_lines", "props", "closing"})
 # Only these mean the provider is unhealthy (spec 7); parse/resolve/write errors do not.
 PROVIDER_ERRORS: tuple[type[Exception], ...] = (OddsApiError, httpx.HTTPError, ProviderUnavailable)
 
+# A provider that answers with one of these is unhealthy (or refusing us); any other 4xx is
+# about the request, e.g. a 404 for a delisted event or a 422, and fails only that call.
+BREAKER_STATUSES = frozenset({401, 429})
+
 Job = Callable[[Session], WriteStats]
+
+
+def trips_breaker(exc: Exception) -> bool:
+    """Whether a provider error counts toward the circuit breaker (spec 7): 401, 429, 5xx,
+    transport errors and an open circuit do; a 404 or 422 does not."""
+    status: int | None = None
+    if isinstance(exc, OddsApiError):
+        status = exc.status
+    elif isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+    return status is None or status in BREAKER_STATUSES or status >= 500
 
 
 class _Skip(Exception):
@@ -397,8 +412,9 @@ class CaptureRunner:
         try:
             with self._sessions() as session:
                 call.job(session)
-        except PROVIDER_ERRORS:
-            self._breaker.failure(call.provider)
+        except PROVIDER_ERRORS as exc:
+            if trips_breaker(exc):
+                self._breaker.failure(call.provider)
             raise
         except Exception:
             self._breaker.success(call.provider)  # the fetch worked; parse/write did not
