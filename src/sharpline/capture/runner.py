@@ -16,6 +16,7 @@ from functools import partial
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -29,16 +30,16 @@ from sharpline.capture.plan import (
     plan_captures,
 )
 from sharpline.capture.quota import QuotaGuard
-from sharpline.db.models import CaptureRun, EntityXref, Event, QuotaLedger
+from sharpline.db.models import CaptureRun, EntityXref, Event
 from sharpline.domain.enums import Sport
 from sharpline.ingest import jobs
 from sharpline.ingest.writer import WriteStats
 from sharpline.sources.espn import PROVIDER as ESPN
 from sharpline.sources.espn.client import EspnClient
-from sharpline.sources.fetched import QuotaInfo
-from sharpline.sources.http import CircuitBreaker
+from sharpline.sources.fetched import Fetched, QuotaInfo
+from sharpline.sources.http import CircuitBreaker, ProviderUnavailable
 from sharpline.sources.odds_api.client import PROVIDER as ODDS
-from sharpline.sources.odds_api.client import OddsApiClient
+from sharpline.sources.odds_api.client import OddsApiClient, OddsApiError
 from sharpline.sources.odds_api.markets import NBA_PROP_MARKETS
 
 EASTERN = ZoneInfo("America/New_York")
@@ -46,6 +47,8 @@ REFRESH_EVERY = timedelta(hours=1)
 CLOSING_LEAD = timedelta(minutes=3)
 _UNCAPPED = 10**9  # plan everything first, then fit what remains into what is left
 _ODDS_KINDS = frozenset({"game_lines", "props", "closing"})
+# Only these mean the provider is unhealthy (spec 7); parse/resolve/write errors do not.
+PROVIDER_ERRORS: tuple[type[Exception], ...] = (OddsApiError, httpx.HTTPError, ProviderUnavailable)
 
 Job = Callable[[Session], WriteStats]
 
@@ -80,6 +83,34 @@ def _error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+class _Metered:
+    """The Odds API client, recording each response's quota headers for the guard (I2)."""
+
+    def __init__(self, odds: OddsApiClient) -> None:
+        self._odds = odds
+        self.billed: list[QuotaInfo | None] = []
+
+    def _record(self, fetch: Callable[[], Fetched]) -> Fetched:
+        try:
+            fetched = fetch()
+        except PROVIDER_ERRORS:
+            raise  # the Odds API does not bill failed requests
+        except Exception:
+            self.billed.append(None)  # a 2xx we could not decode: assume it was billed
+            raise
+        self.billed.append(fetched.quota)
+        return fetched
+
+    def events(self) -> Fetched:
+        return self._record(self._odds.events)
+
+    def game_odds(self, event_ids: Sequence[str] | None = None) -> Fetched:
+        return self._record(lambda: self._odds.game_odds(event_ids))
+
+    def event_odds(self, event_id: str, markets: Sequence[str]) -> Fetched:
+        return self._record(lambda: self._odds.event_odds(event_id, markets))
+
+
 class CaptureRunner:
     def __init__(
         self,
@@ -95,7 +126,7 @@ class CaptureRunner:
     ) -> None:
         self._sessions = session_factory
         self._espn = espn
-        self._odds = odds
+        self._odds = None if odds is None else _Metered(odds)
         self._guard = guard
         self._breaker = breaker
         self._clock = clock
@@ -113,7 +144,6 @@ class CaptureRunner:
         self._pending: list[CaptureAction] = []
         self._dropped: dict[CaptureAction, dict[str, Any]] = {}
         self._replans = 0
-        self._ledger_seen = 0
         self._keys: dict[str, int] = {}  # plan event id -> events.id
         self._odds_keys: set[str] = set()  # plan event ids that are Odds API ids
         with self._sessions.begin() as session:
@@ -192,7 +222,8 @@ class CaptureRunner:
         return games
 
     def _replan(self, t: datetime) -> None:
-        """Re-plan everything after `t` on the stored slate, fit to cap - credits used.
+        """Re-plan everything after `t` on the stored slate, fit to what is left (R10):
+        cap - credits used, and no more than remaining - floor once the provider said so.
 
         Planning from the session start keeps the 30-min/hourly grid and the planner's
         reasons (so its drop order) stable; actions before `t` are history and discarded.
@@ -205,13 +236,19 @@ class CaptureRunner:
             if refresh > t:
                 remaining.append(CaptureAction(refresh, "schedule", (), 0, "hourly"))
             refresh += REFRESH_EVERY
+        cap_left = self._guard.session_cap - self._used()
+        budget = cap_left  # the guard's floor binds re-plans too (I1)
+        if self._guard.remaining is not None:
+            budget = min(budget, self._guard.remaining - self._guard.floor)
         try:
-            fitted = fit_budget(sorted(remaining), self._guard.session_cap - self._used())
+            fitted = fit_budget(sorted(remaining), budget)
             kept, dropped = list(fitted.actions), list(fitted.dropped)
         except ClosingExceedsBudget:
-            if t == self._start:
-                raise
-            # Actual costs ran over the estimates: keep closing, let the guard decide.
+            closing = sum(a.est_cost for a in remaining if a.kind == "closing")
+            if t == self._start and closing > cap_left:
+                raise  # spec 4.2: a session whose closings exceed the cap is rejected
+            # Costs ran over the estimates, or the account is near its floor: keep closing
+            # and let the guard decide at run time.
             kept = [a for a in remaining if a.kind == "closing" or a.est_cost == 0]
             dropped = [(a, "budget") for a in remaining if a not in kept]
         self._pending = sorted(kept)
@@ -297,7 +334,11 @@ class CaptureRunner:
             for event_id in priced:
                 job = partial(jobs.ingest_props, event_id=event_id, markets=self._markets, **common)
                 calls.append(_Call(ODDS, event_id, len(self._markets), job))
-        decision = self._guard.allows(sum(c.est for c in calls))
+        # Never spend what a pending closing needs (I1): closings run in time order.
+        reserve = 0
+        if a.kind != "closing":
+            reserve = sum(p.est_cost for p in self._pending if p.kind == "closing")
+        decision = self._guard.allows(sum(c.est for c in calls), reserve)
         if not decision.allowed:
             raise _Skip(decision.reason or "quota")
         return self._run_calls(calls, notes)
@@ -327,8 +368,11 @@ class CaptureRunner:
         try:
             with self._sessions() as session:
                 call.job(session)
-        except Exception:
+        except PROVIDER_ERRORS:
             self._breaker.failure(call.provider)
+            raise
+        except Exception:
+            self._breaker.success(call.provider)  # the fetch worked; parse/write did not
             raise
         finally:
             if call.provider == ODDS:
@@ -336,23 +380,15 @@ class CaptureRunner:
         self._breaker.success(call.provider)
 
     def _charge(self, est: int) -> None:
-        """Charge the guard what the provider reported, read back from this run's ledger.
+        """Charge the guard from the call's own quota headers (estimate when missing).
 
-        The jobs record the quota headers before parsing, so a call whose parse or write
-        failed is still charged; a call that never got a response has no row and costs 0.
+        The ledger rows written by the jobs stay the record; the guard is charged from the
+        response itself so a missing `x-requests-last` falls back to the estimate.
         """
-        with self._sessions() as session:
-            rows = session.scalars(
-                select(QuotaLedger)
-                .where(
-                    QuotaLedger.capture_run_id == self._run_id,
-                    QuotaLedger.id > self._ledger_seen,
-                )
-                .order_by(QuotaLedger.id)
-            ).all()
-        for row in rows:
-            self._guard.charge(QuotaInfo(row.cost, row.used, row.remaining), est)
-            self._ledger_seen = row.id
+        assert self._odds is not None
+        for quota in self._odds.billed:
+            self._guard.charge(quota, est)
+        self._odds.billed.clear()
 
     # -- persistence ----------------------------------------------------------------------
 

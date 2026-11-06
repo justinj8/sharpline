@@ -26,6 +26,7 @@ from sharpline.db.models import (
     QuotaLedger,
 )
 from sharpline.domain.enums import Sport
+from sharpline.ingest import jobs
 from sharpline.sources.espn.client import EspnClient
 from sharpline.sources.http import CircuitBreaker, HttpClient
 from sharpline.sources.odds_api.client import OddsApiClient
@@ -37,12 +38,25 @@ SLATE = date(2026, 11, 4)  # ET; both tips below are that evening
 TIP1 = datetime(2026, 11, 5, 0, 0, tzinfo=UTC)
 TIP2 = datetime(2026, 11, 5, 2, 30, tzinfo=UTC)
 ODDS_KINDS = ("game_lines", "props", "closing")
-ESPN_IDS = {"evt1": "e1", "evt2": "e2"}
-ESPN_TEAMS = {"evt1": ("BOS", "NY"), "evt2": ("LAC", "DEN")}  # (home, away) ESPN abbreviations
+ESPN_IDS = {"evt1": "e1", "evt2": "e2", "evt3": "e3"}
+# (home, away) ESPN abbreviations
+ESPN_TEAMS = {"evt1": ("BOS", "NY"), "evt2": ("LAC", "DEN"), "evt3": ("MIA", "ORL")}
+EVT3 = {  # a third game, not in the trimmed fixtures
+    "id": "evt3",
+    "sport_key": "basketball_nba",
+    "sport_title": "NBA",
+    "commence_time": "2026-11-05T00:00:00Z",
+    "home_team": "Miami Heat",
+    "away_team": "Orlando Magic",
+}
 
 
 def _load(name: str) -> Any:
     return json.loads((FIXTURES / name).read_text())
+
+
+def _events() -> list[dict[str, Any]]:
+    return [*_load("odds_api/nba_events.json"), EVT3]
 
 
 def _hm(h: int, m: int) -> datetime:
@@ -76,8 +90,15 @@ class World:
         self.tips = dict(tips)
         self.odds_calls: list[tuple[datetime, httpx.URL]] = []
         self.fail_odds_from: datetime | None = None
-        self.prop_cost: int | None = None  # override the x-requests-last of props calls
+        # x-requests-last overrides by ("lines" | "props", call time)
+        self.costs: dict[tuple[str, datetime], int] = {}
+        self.omit_last = False  # drop the x-requests-last header (proxies, caches)
         self._used = 0
+
+    @property
+    def billed(self) -> int:
+        """Credits the provider actually spent (what x-requests-last would have said)."""
+        return self._used
 
     def espn(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/injuries"):
@@ -113,16 +134,16 @@ class World:
         path = request.url.path
         body: Any
         if path.endswith("/events"):
-            body = [
-                self._retimed(e) for e in _load("odds_api/nba_events.json") if e["id"] in self.tips
-            ]
+            body = [self._retimed(e) for e in _events() if e["id"] in self.tips]
             cost = 0
         elif "/events/" in path:
             # Props carry no books here: player resolution is covered by the writer tests.
             event_id = path.split("/")[-2]
-            meta = next(e for e in _load("odds_api/nba_events.json") if e["id"] == event_id)
+            meta = next(e for e in _events() if e["id"] == event_id)
             body = self._retimed({**meta, "bookmakers": []})
-            cost = self.prop_cost or len(request.url.params["markets"].split(","))
+            cost = self.costs.get(
+                ("props", self.clock()), len(request.url.params["markets"].split(","))
+            )
         else:
             wanted = request.url.params.get("eventIds")
             body = [
@@ -130,13 +151,15 @@ class World:
                 for e in _load("odds_api/nba_game_odds.json")
                 if e["id"] in self.tips and (wanted is None or e["id"] in wanted.split(","))
             ]
-            cost = len(request.url.params["markets"].split(","))
+            cost = self.costs.get(("lines", self.clock()), 3)
         self._used += cost
         headers = {
             "x-requests-last": str(cost),
             "x-requests-used": str(self._used),
             "x-requests-remaining": str(500 - self._used),
         }
+        if self.omit_last:
+            del headers["x-requests-last"]
         return httpx.Response(200, json=body, headers=headers)
 
 
@@ -319,6 +342,7 @@ def test_tip_moved_later_reschedules_closing(sessions: sessionmaker[Session]) ->
 
     clock.hooks[_hm(23, 57)] = reschedule
     run_id = _runner(sessions, clock, world).run(Sport.NBA, SLATE)
+    assert clock.hooks == {}  # the reschedule really happened
 
     run = _run(sessions, run_id)
     assert run.status == "completed"
@@ -344,6 +368,7 @@ def test_started_game_never_priced(sessions: sessionmaker[Session]) -> None:
 
     clock.hooks[_hm(23, 57)] = tip_off
     run_id = _runner(sessions, clock, world).run(Sport.NBA, SLATE)
+    assert clock.hooks == {}
 
     run = _run(sessions, run_id)
     [closing] = _entries(run, "closing")
@@ -361,11 +386,11 @@ def test_replan_fits_remaining_budget(sessions: sessionmaker[Session]) -> None:
     """R10: after a refresh the remaining actions are fit into cap - credits used so far."""
     clock = FakeClock(_hm(23, 0))
     world = World(clock, {"evt1": TIP1, "evt2": TIP2})
-    world.prop_cost = 12  # props really cost twice the estimate
-    run_id = _runner(sessions, clock, world, cap=60).run(Sport.NBA, SLATE)
+    world.costs[("props", _hm(23, 0))] = 12  # start props really cost twice the estimate
+    run_id = _runner(sessions, clock, world, cap=54).run(Sport.NBA, SLATE)
 
     run = _run(sessions, run_id)
-    # By the 00:00 refresh: 3 (lines) + 24 (start props) + 15 (evt1 closing) = 42 used, 18 left;
+    # By the 00:00 refresh: 3 (lines) + 24 (start props) + 9 (evt1 closing) = 36 used, 18 left;
     # remaining est 3 x 3 hourly lines + 6 T-90 props + 9 closing = 24 -> drop latest hourly first.
     dropped = [(d["kind"], d["at"], d["status"], d["detail"]) for d in run.plan["dropped"]]
     assert dropped == [
@@ -374,7 +399,75 @@ def test_replan_fits_remaining_budget(sessions: sessionmaker[Session]) -> None:
     ]
     executed_lines = [e["at"] for e in _entries(run, "game_lines")]
     assert executed_lines == [_iso(_hm(23, 0)), _iso(_hm(0, 0))]
-    assert run.credits_used <= 60
+    assert [e["status"] for e in _entries(run, "closing")] == ["done", "done"]
+    for odds_id in ("evt1", "evt2"):
+        assert _closing_snapshots(sessions, _event_pk(sessions, odds_id))
+    assert run.credits_used == 54
+
+
+def test_props_cannot_spend_the_closing_reserve(sessions: sessionmaker[Session]) -> None:
+    """I1: a non-closing action must leave every pending closing's estimate in reserve."""
+    clock = FakeClock(_hm(23, 0))
+    world = World(clock, {"evt1": TIP1})
+    world.costs[("lines", _hm(23, 0))] = 9  # the start lines overrun: 9 of the 18 cap is gone
+    run_id = _runner(sessions, clock, world, cap=18).run(Sport.NBA, SLATE)
+
+    run = _run(sessions, run_id)
+    assert run.plan["dropped"] == []  # the plan (3 + 6 + 9) fit; the overrun is runtime-only
+    [props] = _entries(run, "props")
+    assert props["status"] == "skipped" and props["detail"].startswith("session_cap: ")
+    assert "reserve 9" in props["detail"]
+    [closing] = _entries(run, "closing")
+    assert closing["status"] == "done"
+    assert _closing_snapshots(sessions, _event_pk(sessions, "evt1"))
+    assert run.credits_used == world.billed == 18
+
+
+def test_missing_last_header_is_charged_the_estimate(sessions: sessionmaker[Session]) -> None:
+    """I2: without x-requests-last the guard charges estimates, so the cap still binds."""
+    clock = FakeClock(_hm(23, 0))
+    world = World(clock, {"evt1": TIP1, "evt2": TIP2})
+    world.omit_last = True
+    run_id = _runner(sessions, clock, world, cap=30).run(Sport.NBA, SLATE)
+
+    run = _run(sessions, run_id)
+    with sessions() as session:
+        ledger = session.scalars(
+            select(QuotaLedger.cost).where(QuotaLedger.capture_run_id == run_id)
+        ).all()
+    assert ledger and set(ledger) == {0}  # the ledger still records what the headers said
+    # Charged at estimate, every re-plan sees what is left and drops hourly lines: start lines 3
+    # + evt1 closing 9 + 00:00 lines 3 + evt2 T-90 props 6 + evt2 closing 9 = 30, never more.
+    assert run.credits_used == world.billed == 30
+    assert [e["at"] for e in _entries(run, "game_lines")] == [_iso(_hm(23, 0)), _iso(_hm(0, 0))]
+    assert [e["status"] for e in _entries(run, "closing")] == ["done", "done"]
+
+
+def test_parser_errors_do_not_open_the_breaker(
+    sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I3 / spec 7: a parse error fails its action only; the provider stays healthy."""
+    real = jobs.parse_odds
+
+    def props_parser_bug(payload: Any, captured_at: datetime) -> Any:
+        if isinstance(payload, dict):  # props payloads are single events; lines are lists
+            raise ValueError("props parser bug")
+        return real(payload, captured_at)
+
+    monkeypatch.setattr("sharpline.ingest.jobs.parse_odds", props_parser_bug)
+    tip = _hm(23, 10)  # closing at 23:07, inside the breaker's 10-min cooldown
+    clock = FakeClock(_hm(23, 0))
+    world = World(clock, {"evt1": tip, "evt2": tip, "evt3": tip})
+    run_id = _runner(sessions, clock, world).run(Sport.NBA, SLATE)
+
+    run = _run(sessions, run_id)
+    [props] = _entries(run, "props")  # three calls, three parser failures in a row
+    assert props["status"] == "failed" and props["detail"].count("ValueError: ") == 3
+    [closing] = _entries(run, "closing")
+    assert closing["status"] == "failed" and "circuit_open" not in closing["detail"]
+    assert not any("circuit_open" in (e["detail"] or "") for e in _entries(run))
+    for odds_id in ("evt1", "evt2"):  # the closing game lines parsed and were written
+        assert _closing_snapshots(sessions, _event_pk(sessions, odds_id))
 
 
 def test_interrupt_marks_run_interrupted(sessions: sessionmaker[Session]) -> None:

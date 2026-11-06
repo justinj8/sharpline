@@ -54,3 +54,22 @@ def test_guard_keeps_last_known_remaining() -> None:
     guard.charge(QuotaInfo(last=3, used=13, remaining=None), 3)
     assert guard.remaining == 490
     assert guard.credits_used == 6
+
+
+def test_guard_reserve_counts_against_cap() -> None:
+    guard = QuotaGuard(session_cap=20, floor=0)
+    guard.charge(None, 5)
+    assert guard.allows(6, reserve=9).allowed  # 5 + 6 + 9 == 20
+    decision = guard.allows(7, reserve=9)
+    assert not decision.allowed
+    assert decision.reason is not None and "reserve 9" in decision.reason
+
+
+def test_guard_reserve_counts_against_floor() -> None:
+    guard = QuotaGuard(session_cap=180, floor=20)
+    guard.charge(QuotaInfo(last=0, used=0, remaining=35), 0)
+    assert guard.allows(6).allowed
+    decision = guard.allows(6, reserve=10)  # 35 - 6 - 10 < 20
+    assert not decision.allowed
+    assert decision.reason is not None and decision.reason.startswith("floor")
+    assert guard.floor == 20 and guard.session_cap == 180

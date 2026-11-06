@@ -33,7 +33,7 @@ from sharpline.sources.espn.parse import parse_injuries, parse_scoreboard
 from sharpline.sources.fetched import Fetched
 from sharpline.sources.nba_stats.client import NbaStatsClient
 from sharpline.sources.nba_stats.parse import parse_player_game_logs
-from sharpline.sources.odds_api.client import OddsApiClient
+from sharpline.sources.odds_api.client import OddsFeed
 from sharpline.sources.odds_api.parse import parse_events, parse_odds
 from sharpline.sports.nba.season import season_for
 
@@ -116,7 +116,7 @@ def _write_odds(
 
 
 def ingest_odds_events(
-    session: Session, odds: OddsApiClient, *, capture_run_id: int | None = None
+    session: Session, odds: OddsFeed, *, capture_run_id: int | None = None
 ) -> WriteStats:
     """The Odds API event list (0 credits): links its event ids to our events (R2)."""
     fetched = odds.events()
@@ -129,7 +129,7 @@ def ingest_odds_events(
 
 def ingest_game_lines(
     session: Session,
-    odds: OddsApiClient,
+    odds: OddsFeed,
     *,
     event_ids: Sequence[str] | None = None,
     is_closing: bool = False,
@@ -141,7 +141,7 @@ def ingest_game_lines(
 
 def ingest_props(
     session: Session,
-    odds: OddsApiClient,
+    odds: OddsFeed,
     event_id: str,
     markets: Sequence[str],
     *,
