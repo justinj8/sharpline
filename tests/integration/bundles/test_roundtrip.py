@@ -44,6 +44,7 @@ TIP1 = datetime(2026, 11, 5, 0, 0, tzinfo=UTC)
 TIP2 = datetime(2026, 11, 5, 2, 30, tzinfo=UTC)
 ESPN_TIP2 = datetime(2026, 11, 5, 2, 35, tzinfo=UTC)  # providers disagree by 5 min (R9)
 START = datetime(2026, 11, 4, 23, 0, tzinfo=UTC)
+MID_CAPTURE_FINAL = datetime(2026, 11, 5, 2, 0, tzinfo=UTC)  # hourly refresh sees e1 final
 FINAL_EARLY = datetime(2026, 11, 5, 6, 0, tzinfo=UTC)
 FINAL_LATE = datetime(2026, 11, 5, 15, 0, tzinfo=UTC)  # a stat correction
 BOX_SCORES_AT = datetime(2026, 11, 5, 16, 0, tzinfo=UTC)
@@ -119,10 +120,14 @@ def _scoreboard(final: dict[str, tuple[int, int]] | None = None) -> dict[str, An
     return {"events": events}
 
 
-def _espn_handler(request: httpx.Request) -> httpx.Response:
-    if request.url.path.endswith("/injuries"):
-        return httpx.Response(200, json=_load("espn/nba_injuries.json"))
-    return httpx.Response(200, json=_scoreboard())
+def _espn_handler(clock: Callable[[], datetime]) -> Callable[[httpx.Request], httpx.Response]:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/injuries"):
+            return httpx.Response(200, json=_load("espn/nba_injuries.json"))
+        early_final = {"e1": (110, 104)} if clock() >= MID_CAPTURE_FINAL else None
+        return httpx.Response(200, json=_scoreboard(early_final))
+
+    return handler
 
 
 def _odds_handler(request: httpx.Request) -> httpx.Response:
@@ -205,7 +210,7 @@ def capture_slate(sessions: sessionmaker[Session]) -> int:
     )
     runner = CaptureRunner(
         sessions,
-        espn=_espn(clock, _espn_handler),
+        espn=_espn(clock, _espn_handler(clock)),
         odds=odds,
         guard=QuotaGuard(session_cap=180, floor=20),
         breaker=CircuitBreaker(clock=clock),
@@ -305,7 +310,11 @@ def test_captured_slate_is_non_trivial(bundle: tuple[Path, Any]) -> None:
         ("BOS", 111, 104),
         ("LAC", 99, 120),
     ]
-    assert {r[5] for r in snap["results"]} == {FINAL_EARLY}  # R4: first observed final
+    # R4: first observed final, including the one an hourly schedule refresh saw mid-capture
+    assert {(r[0], r[5]) for r in snap["results"]} == {
+        ("BOS", MID_CAPTURE_FINAL),
+        ("LAC", FINAL_EARLY),
+    }
     assert sum(snap["player_game_stats"].values()) == 4
     assert {(r[0], r[2]) for r in snap["events"]} == {("BOS", TIP1), ("LAC", ESPN_TIP2)}
 

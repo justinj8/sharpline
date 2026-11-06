@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import select, text, tuple_
 from sqlalchemy.orm import Session
 
 from sharpline.bundles.format import read_bundle
@@ -162,12 +162,22 @@ def _load_players(session: Session, records: list[dict[str, Any]]) -> int:
 
 def load_bundle(session: Session, path: Path) -> LoadReport:
     """Verify, load and reparse a bundle; raises BundleIntegrityError before writing."""
-    _manifest, records = read_bundle(path)
+    manifest, records = read_bundle(path)
     by_kind: dict[str, list[dict[str, Any]]] = {}
     for r in records:
         by_kind.setdefault(r["kind"], []).append(r)
 
+    # Even the revision read runs inside the unit: a query before it would autobegin a
+    # transaction on an idle session and turn both units into uncommitted savepoints.
     with transaction(session):
+        revision = session.scalar(text("SELECT version_num FROM alembic_version"))
+        if manifest.alembic_revision != revision:  # records are raw payloads: usually harmless
+            log.warning(
+                "bundle %s was exported at alembic %s, loading into %s",
+                path.name,
+                manifest.alembic_revision,
+                revision,
+            )
         ids, inserted = _load_sources(session, by_kind.get("source", []))
         observations = _load_observations(session, by_kind.get("observation", []), ids)
         players = _load_players(session, by_kind.get("player", []))
