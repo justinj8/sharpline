@@ -20,6 +20,14 @@ class QuotaGuard:
         self._used = 0
         self._remaining: int | None = None
 
+    def seed(self, *, used: int, remaining: int | None) -> None:
+        """Start from what is already known (F5): `used` is what earlier sessions of the same
+        slate day spent, so the cap is per slate day, not per run; `remaining` is the
+        provider's last reported balance (None: unknown, keep what the guard has)."""
+        self._used = used
+        if remaining is not None:
+            self._remaining = remaining
+
     @property
     def session_cap(self) -> int:
         return self._session_cap
