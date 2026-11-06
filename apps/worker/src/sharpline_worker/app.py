@@ -2,18 +2,52 @@
 
 Jobs live in Postgres (the same database as everything else), so a job and the rows
 it writes commit or roll back together.
+
+Live mode (spec section 6.3, off unless SHARPLINE_LIVE_CAPTURE): every 15 minutes the
+`plan_and_enqueue` tick resolves today's slate date, plans it from the stored events for
+the log, and enqueues one `run_capture_session` job for the day unless a session for it is
+already running or completed. One job per day, not one per action: the session runner
+re-plans on every schedule refresh, reschedules a closing when a tip moves and keeps the
+closing reserve, and it can only do that while it owns the whole day.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable, Collection, Sequence
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
+
 import procrastinate
 import structlog
+from procrastinate.exceptions import AlreadyEnqueued
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
 
+from sharpline.bundles.export import export_bundle
+from sharpline.bundles.store import DEFAULT_LOCAL_ROOT
+from sharpline.capture import clients as capture_clients
+from sharpline.capture.plan import Budget, ClosingExceedsBudget, SlateGame, plan_captures
+from sharpline.capture.runner import load_slate
 from sharpline.config import Settings
-from sharpline.db.session import normalize_database_url
+from sharpline.db.models import CaptureRun
+from sharpline.db.session import make_engine, make_session_factory, normalize_database_url
+from sharpline.domain.enums import Sport
 
 HEARTBEAT_CRON = "*/5 * * * *"
 OPS_QUEUE = "ops"
+CAPTURE_CRON = "*/15 * * * *"
+CAPTURE_QUEUE = "capture"
+PLAN_AND_ENQUEUE_TASK = "sharpline_worker.app.plan_and_enqueue"
+RUN_CAPTURE_TASK = "sharpline_worker.app.run_capture_session"
+LIVE_SPORT = Sport.NBA
+# A session that is under way or finished owns the day; failed/interrupted ones may retry.
+BLOCKING_STATUSES = frozenset({"running", "completed"})
+# Seconds SIGTERM waits for running jobs. A capture session never finishes in time, so
+# do not wait for it: its run is recovered (interrupted + exported) at the next startup.
+SHUTDOWN_GRACE_S = 20.0
 
 log = structlog.get_logger()
 
@@ -29,8 +63,132 @@ def heartbeat(timestamp: int) -> str:
     return "ok"
 
 
+@dataclass(frozen=True)
+class LiveState:
+    """What the tick needs from the database about one slate day."""
+
+    statuses: Sequence[str]  # of that day's capture runs
+    games: Sequence[SlateGame]  # stored scheduled games
+
+
+def capture_lock(slate_date: date, sport: Sport = LIVE_SPORT) -> str:
+    return f"capture:{sport.value}:{slate_date.isoformat()}"
+
+
+def should_enqueue(statuses: Collection[str]) -> bool:
+    return not BLOCKING_STATUSES.intersection(statuses)
+
+
+def recover_orphaned_runs(
+    sessions: sessionmaker[Session],
+    *,
+    out_dir: Path = DEFAULT_LOCAL_ROOT,
+    now: datetime | None = None,
+) -> list[tuple[int, Path | None]]:
+    """Close live runs a previous worker left `running` (spec section 7) and export them.
+
+    Call at startup, before the worker consumes jobs. ASSUMES A SINGLE WORKER REPLICA
+    (production runs `replicas: 1`): with two workers, one starting up would interrupt
+    the other's session that is genuinely still running. Manual (CLI) runs are left alone.
+    Each run is marked `interrupted` (so the next tick may retry the day) and committed
+    before its partial bundle is exported; a failed export is logged, not raised.
+    """
+    finished = now or datetime.now(UTC)
+    with sessions.begin() as session:
+        orphans = session.scalars(
+            select(CaptureRun)
+            .where(CaptureRun.mode == "live", CaptureRun.status == "running")
+            .order_by(CaptureRun.id)
+        ).all()
+        for run in orphans:
+            run.status = "interrupted"
+            run.finished_at = finished
+        run_ids = [run.id for run in orphans]
+    recovered: list[tuple[int, Path | None]] = []
+    for run_id in run_ids:
+        path: Path | None = None
+        try:
+            with sessions() as session:
+                path = export_bundle(session, run_id, out_dir, now=finished)
+        except Exception as exc:
+            log.error("capture.live.recover_export_failed", run_id=run_id, error=type(exc).__name__)
+        log.warning("capture.live.recovered", run_id=run_id, bundle=str(path) if path else None)
+        recovered.append((run_id, path))
+    return recovered
+
+
+def read_live_state(sessions: sessionmaker[Session], slate_date: date) -> LiveState:
+    with sessions() as session:
+        statuses = session.scalars(
+            select(CaptureRun.status).where(
+                CaptureRun.sport == LIVE_SPORT.value, CaptureRun.slate_date == slate_date
+            )
+        ).all()
+        entries = load_slate(session, LIVE_SPORT, slate_date)
+    return LiveState(statuses=list(statuses), games=[e.game for e in entries])
+
+
+def live_tick(
+    timestamp: int,
+    *,
+    timezone: str,
+    cap: int,
+    read_state: Callable[[date], LiveState],
+    defer: Callable[[date], None],
+) -> str:
+    """One live-mode tick: "enqueued" or "skipped". `defer` may raise AlreadyEnqueued."""
+    now = datetime.fromtimestamp(timestamp, UTC)
+    slate_date = now.astimezone(ZoneInfo(timezone)).date()
+    state = read_state(slate_date)
+    fields = {"slate_date": slate_date.isoformat(), "scheduled_for": timestamp}
+    try:  # visibility only: the session plans for itself from a fresh schedule
+        plan = plan_captures(state.games, now, Budget(cap))
+        log.info(
+            "capture.live.plan",
+            **fields,
+            games=len(state.games),
+            actions=len(plan.actions),
+            est_credits=plan.est_cost,
+            dropped=len(plan.dropped),
+        )
+    except ClosingExceedsBudget as exc:
+        log.warning("capture.live.plan", **fields, games=len(state.games), error=str(exc))
+    if not should_enqueue(state.statuses):
+        blocking = sorted(BLOCKING_STATUSES.intersection(state.statuses))
+        log.info("capture.live.skip", **fields, reason=f"run_{blocking[0]}")
+        return "skipped"
+    try:
+        defer(slate_date)
+    except AlreadyEnqueued:
+        log.info("capture.live.skip", **fields, reason="already_queued")
+        return "skipped"
+    log.info("capture.live.enqueued", **fields, lock=capture_lock(slate_date))
+    return "enqueued"
+
+
+def worker_queues(settings: Settings) -> list[str]:
+    """Queues the worker consumes: ops always, capture only in live mode."""
+    return [OPS_QUEUE, CAPTURE_QUEUE] if settings.live_capture else [OPS_QUEUE]
+
+
+def worker_concurrency(settings: Settings) -> int:
+    """A live session job runs for hours: a second slot keeps the tick and heartbeat going."""
+    return 2 if settings.live_capture else 1
+
+
+def worker_options(settings: Settings) -> dict[str, Any]:
+    """Keyword arguments for `App.run_worker_async`."""
+    return {
+        "queues": worker_queues(settings),
+        "concurrency": worker_concurrency(settings),
+        "shutdown_graceful_timeout": SHUTDOWN_GRACE_S,
+    }
+
+
 def build_app(
-    settings: Settings, connector: procrastinate.BaseConnector | None = None
+    settings: Settings,
+    connector: procrastinate.BaseConnector | None = None,
+    session_factory: sessionmaker[Session] | None = None,
 ) -> procrastinate.App:
     app = procrastinate.App(
         connector=connector
@@ -38,4 +196,36 @@ def build_app(
     )
     task = app.task(name="sharpline_worker.app.heartbeat", queue=OPS_QUEUE)(heartbeat)
     app.periodic(cron=HEARTBEAT_CRON, periodic_id="heartbeat")(task)
+    if settings.live_capture:  # off by default: no capture job unless explicitly enabled
+        _register_live_capture(app, settings, session_factory)
     return app
+
+
+def _register_live_capture(
+    app: procrastinate.App,
+    settings: Settings,
+    session_factory: sessionmaker[Session] | None,
+) -> None:
+    sessions = session_factory or make_session_factory(make_engine(settings))
+
+    @app.task(name=RUN_CAPTURE_TASK, queue=CAPTURE_QUEUE)
+    def run_capture_session(sport: str, slate_date: str) -> int:
+        """The whole day's capture session, with clients built like the CLI's."""
+        runner = capture_clients.build_runner(sessions, settings)
+        return runner.run(Sport(sport), date.fromisoformat(slate_date), mode="live")
+
+    def defer(slate_date: date) -> None:
+        run_capture_session.configure(queueing_lock=capture_lock(slate_date)).defer(
+            sport=LIVE_SPORT.value, slate_date=slate_date.isoformat()
+        )
+
+    @app.periodic(cron=CAPTURE_CRON, periodic_id="plan_and_enqueue")
+    @app.task(name=PLAN_AND_ENQUEUE_TASK, queue=CAPTURE_QUEUE)
+    def plan_and_enqueue(timestamp: int) -> str:
+        return live_tick(
+            timestamp,
+            timezone=settings.schedule_timezone,
+            cap=settings.capture_session_cap,
+            read_state=lambda day: read_live_state(sessions, day),
+            defer=defer,
+        )

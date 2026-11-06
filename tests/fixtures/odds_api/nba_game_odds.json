@@ -1,0 +1,234 @@
+[
+  {
+    "id": "evt1",
+    "sport_key": "basketball_nba",
+    "sport_title": "NBA",
+    "commence_time": "2026-11-05T00:00:00Z",
+    "home_team": "Boston Celtics",
+    "away_team": "New York Knicks",
+    "bookmakers": [
+      {
+        "key": "draftkings",
+        "title": "DraftKings",
+        "last_update": "2026-11-04T18:00:00Z",
+        "markets": [
+          {
+            "key": "h2h",
+            "last_update": "2026-11-04T18:00:00Z",
+            "outcomes": [
+              {
+                "name": "Boston Celtics",
+                "price": -230
+              },
+              {
+                "name": "New York Knicks",
+                "price": 190
+              }
+            ]
+          },
+          {
+            "key": "spreads",
+            "last_update": "2026-11-04T18:00:00Z",
+            "outcomes": [
+              {
+                "name": "Boston Celtics",
+                "price": -110,
+                "point": -5.5
+              },
+              {
+                "name": "New York Knicks",
+                "price": -110,
+                "point": 5.5
+              }
+            ]
+          },
+          {
+            "key": "totals",
+            "last_update": "2026-11-04T18:00:00Z",
+            "outcomes": [
+              {
+                "name": "Over",
+                "price": -110,
+                "point": 224.5
+              },
+              {
+                "name": "Under",
+                "price": -110,
+                "point": 224.5
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "key": "fanduel",
+        "title": "FanDuel",
+        "last_update": "2026-11-04T18:00:00Z",
+        "markets": [
+          {
+            "key": "h2h",
+            "last_update": "2026-11-04T18:00:00Z",
+            "outcomes": [
+              {
+                "name": "Boston Celtics",
+                "price": -225
+              },
+              {
+                "name": "New York Knicks",
+                "price": 185
+              }
+            ]
+          },
+          {
+            "key": "spreads",
+            "last_update": "2026-11-04T18:00:00Z",
+            "outcomes": [
+              {
+                "name": "Boston Celtics",
+                "price": -108,
+                "point": -5.5
+              },
+              {
+                "name": "New York Knicks",
+                "price": -112,
+                "point": 5.5
+              }
+            ]
+          },
+          {
+            "key": "totals",
+            "last_update": "2026-11-04T18:00:00Z",
+            "outcomes": [
+              {
+                "name": "Over",
+                "price": -105,
+                "point": 225.0
+              },
+              {
+                "name": "Under",
+                "price": 50,
+                "point": 225.0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "evt2",
+    "sport_key": "basketball_nba",
+    "sport_title": "NBA",
+    "commence_time": "2026-11-05T02:30:00Z",
+    "home_team": "Los Angeles Clippers",
+    "away_team": "Denver Nuggets",
+    "bookmakers": [
+      {
+        "key": "draftkings",
+        "title": "DraftKings",
+        "last_update": "2026-11-04T18:00:00Z",
+        "markets": [
+          {
+            "key": "h2h",
+            "last_update": "2026-11-04T18:00:00Z",
+            "outcomes": [
+              {
+                "name": "Los Angeles Clippers",
+                "price": 120
+              },
+              {
+                "name": "Denver Nuggets",
+                "price": -142
+              }
+            ]
+          },
+          {
+            "key": "spreads",
+            "last_update": "2026-11-04T18:00:00Z",
+            "outcomes": [
+              {
+                "name": "Los Angeles Clippers",
+                "price": -110,
+                "point": -5.5
+              },
+              {
+                "name": "Denver Nuggets",
+                "price": -110,
+                "point": 5.5
+              }
+            ]
+          },
+          {
+            "key": "totals",
+            "last_update": "2026-11-04T18:00:00Z",
+            "outcomes": [
+              {
+                "name": "Over",
+                "price": -110,
+                "point": 224.5
+              },
+              {
+                "name": "Under",
+                "price": -110,
+                "point": 224.5
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "key": "fanduel",
+        "title": "FanDuel",
+        "last_update": "2026-11-04T18:00:00Z",
+        "markets": [
+          {
+            "key": "h2h",
+            "last_update": "2026-11-04T18:00:00Z",
+            "outcomes": [
+              {
+                "name": "Los Angeles Clippers",
+                "price": 118
+              },
+              {
+                "name": "Denver Nuggets",
+                "price": -138
+              }
+            ]
+          },
+          {
+            "key": "spreads",
+            "last_update": "2026-11-04T18:00:00Z",
+            "outcomes": [
+              {
+                "name": "Los Angeles Clippers",
+                "price": -108,
+                "point": -5.5
+              },
+              {
+                "name": "Denver Nuggets",
+                "price": -112,
+                "point": 5.5
+              }
+            ]
+          },
+          {
+            "key": "totals",
+            "last_update": "2026-11-04T18:00:00Z",
+            "outcomes": [
+              {
+                "name": "Over",
+                "price": -105,
+                "point": 225.0
+              },
+              {
+                "name": "Under",
+                "price": 50,
+                "point": 225.0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+]
