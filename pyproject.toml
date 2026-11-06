@@ -16,6 +16,7 @@ dependencies = [
     "nba-api==1.12.0",
     "boto3==1.43.123",
     "httpx==0.28.1",
+    "requests==2.34.2",  # imported by the CLI directly (nba_api errors), not only via nba-api
 ]
 
 [project.scripts]

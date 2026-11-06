@@ -22,9 +22,11 @@ async def _run() -> None:
     log.info("worker.start", **options, env=settings.env)
     if settings.live_capture:
         log.warning("capture.live.enabled", setting="SHARPLINE_LIVE_CAPTURE")
-    # Before consuming: a live session the previous worker was running when it died stays
-    # `running` and would block its day forever (single replica, see the function).
-    await asyncio.to_thread(recover_orphaned_runs, sessions)
+        # Before consuming: a live session the previous worker was running when it died
+        # stays `running` and would block its day forever (single replica, see the
+        # function). Live mode only: the worker has no pre-deploy step, so with capture off
+        # it must not read `capture_runs`, which may not exist until the api migrates.
+        await asyncio.to_thread(recover_orphaned_runs, sessions)
     async with app.open_async():
         await app.run_worker_async(**options)
 
