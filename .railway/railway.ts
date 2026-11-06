@@ -12,7 +12,7 @@
  * Secrets never live here: DATABASE_URL is a reference to the Postgres service, and the
  * database's own credentials stay on Railway.
  */
-import { defineRailway, github, postgres, project, service, volume } from "railway/iac";
+import { bucket, defineRailway, github, postgres, project, service, volume } from "railway/iac";
 
 const REPO = "justinj8/sharpline";
 
@@ -62,8 +62,12 @@ export default defineRailway((ctx) => {
     env,
   });
 
+  // Private S3-compatible bucket holding slate bundles. Its credentials are copied into
+  // the local .env by hand (BUNDLE_*); they are deliberately not wired into service env.
+  const bundles = bucket("sharpline-bundles", { region: "sjc" });
+
   return project("sharpline", {
     variables: { managed: true },
-    resources: [api, worker, db, dbVolume],
+    resources: [api, worker, db, dbVolume, bundles],
   });
 });
