@@ -9,7 +9,10 @@ drops any pick whose odds, injury or projection claims cannot be traced to a fet
 source, and a calibration layer scored by Brier score and closing line value. Every
 run's cost is recorded.
 
-> Status: **Phase 0 — Foundation, deployed.** Live health check:
+> Status: **Phase 1 — Data spine, deployed.** The odds, injuries, results and box scores
+> are recorded unchanged and replayed into production from hashed slate bundles
+> ([ADR 0004](docs/adrs/0004-record-and-replay.md),
+> [capture runbook](docs/runbooks/capture.md)). Live health check:
 > <https://api-production-e3800.up.railway.app/v1/health>. See `docs/superpowers/specs/` for the design and
 > `docs/superpowers/plans/` for phase plans. All tracking is paper tracking for
 > research; nothing here is betting advice.
