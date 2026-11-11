@@ -6,18 +6,17 @@ resolve are skipped (the resolver queues them for review); nothing here commits.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from sharpline.db.models import (
-    EntityXref,
     Event,
     Injury,
     Market,
@@ -333,7 +332,12 @@ class Writer:
 
         nba_stats is the only provider that creates players, so this is how a fresh
         database gets them; a player's team follows his newest game (trades).
+
+        Lookups are batched, because a backfill writes a season of rows over a public
+        proxy: the rows' known players and games are loaded in one query each, the players'
+        newest stored games in one more, and the box scores go in as one insert.
         """
+        batch = list(rows)
         provider = self._source(source_id).provider
         tally = _Tally()
         teams = {
@@ -342,8 +346,10 @@ class Writer:
                 select(Team.abbreviation, Team.id).where(Team.sport == Sport.NBA)
             )
         }
-        newest: dict[int, date | None] = {}  # player -> newest game date seen
-        for row in rows:
+        self._resolver.prime_xrefs(provider, "player", {r.provider_player_id for r in batch})
+        self._resolver.prime_xrefs(provider, "event", {r.provider_game_id for r in batch})
+        placed: list[tuple[PlayerGameStatRow, int, int]] = []
+        for row in batch:
             team_id = teams.get(row.team_abbr)
             if team_id is None:
                 tally.skipped += 1
@@ -354,47 +360,61 @@ class Writer:
             if not isinstance(player, Resolved):
                 tally.review()
                 continue
-            self._follow_team(player.entity_id, team_id, row.game_date, newest)
-            event_id = self._game_event(provider, row, team_id)
+            placed.append((row, player.entity_id, team_id))
+        self._follow_teams(placed)
+
+        games: dict[str, int | None] = {}  # a game with no stored event is looked up once
+        values: dict[tuple[int, int], dict[str, object]] = {}
+        for row, player_id, team_id in placed:
+            if row.provider_game_id not in games:
+                games[row.provider_game_id] = self._game_event(provider, row, team_id)
+            event_id = games[row.provider_game_id]
             if event_id is None:
                 tally.skipped += 1
                 continue
+            values[(event_id, player_id)] = {
+                "event_id": event_id,
+                "player_id": player_id,
+                "stats": row.stats,
+                "source_id": source_id,
+            }
+            tally.written += 1
+        if values:
+            stmt = insert(PlayerGameStat).values(list(values.values()))
             self._s.execute(
-                insert(PlayerGameStat)
-                .values(
-                    event_id=event_id,
-                    player_id=player.entity_id,
-                    stats=row.stats,
-                    source_id=source_id,
-                )
-                .on_conflict_do_update(
+                stmt.on_conflict_do_update(
                     index_elements=["event_id", "player_id"],
-                    set_={"stats": row.stats, "source_id": source_id},
+                    set_={"stats": stmt.excluded.stats, "source_id": stmt.excluded.source_id},
                 )
             )
-            tally.written += 1
         self._s.flush()
         return tally.stats()
 
-    def _follow_team(
-        self, player_id: int, team_id: int, game_date: date, newest: dict[int, date | None]
-    ) -> None:
-        """Move the player to `team_id` when this game is the newest seen for him: in this
-        batch, or among his stored box scores (so source and row order do not matter)."""
-        if player_id not in newest:
-            latest = self._s.scalar(
-                select(func.max(Event.commence_time))
-                .join(PlayerGameStat, PlayerGameStat.event_id == Event.id)
-                .where(PlayerGameStat.player_id == player_id)
-            )
-            newest[player_id] = None if latest is None else latest.astimezone(EASTERN).date()
-        seen = newest[player_id]
-        if seen is not None and game_date < seen:
+    def _follow_teams(self, placed: Sequence[tuple[PlayerGameStatRow, int, int]]) -> None:
+        """Move each player to the team of his newest game: his newest row here, unless a
+        stored box score is newer (so source and row order do not matter)."""
+        newest: dict[int, tuple[date, int]] = {}
+        for row, player_id, team_id in placed:
+            seen = newest.get(player_id)
+            if seen is None or row.game_date >= seen[0]:
+                newest[player_id] = (row.game_date, team_id)
+        if not newest:
             return
-        newest[player_id] = game_date
-        player = self._s.get_one(Player, player_id)
-        if player.team_id != team_id:
-            player.team_id = team_id
+        stored = self._s.execute(
+            select(Player.id, Player.team_id, func.max(Event.commence_time))
+            .outerjoin(PlayerGameStat, PlayerGameStat.player_id == Player.id)
+            .outerjoin(Event, Event.id == PlayerGameStat.event_id)
+            .where(Player.id.in_(list(newest)))
+            .group_by(Player.id)
+        )
+        for player_id, current_team, latest in stored:
+            game_date, team_id = newest[player_id]
+            if latest is not None and game_date < latest.astimezone(EASTERN).date():
+                continue
+            if current_team != team_id:
+                self._s.execute(
+                    update(Player).where(Player.id == player_id).values(team_id=team_id)
+                )
 
     def _game_event(self, provider: str, row: PlayerGameStatRow, team_id: int) -> int | None:
         event_id = self._xref(provider, "event", row.provider_game_id)
@@ -419,21 +439,10 @@ class Writer:
         return self._s.get_one(Source, source_id)
 
     def _xref(self, provider: str, kind: str, provider_id: str) -> int | None:
-        return self._s.scalar(
-            select(EntityXref.entity_id).where(
-                EntityXref.provider == provider,
-                EntityXref.entity_kind == kind,
-                EntityXref.provider_id == provider_id,
-            )
-        )
+        return self._resolver.xref(provider, kind, provider_id)
 
     def _add_xref(self, kind: str, entity_id: int, provider: str, provider_id: str) -> None:
-        self._s.add(
-            EntityXref(
-                entity_kind=kind, entity_id=entity_id, provider=provider, provider_id=provider_id
-            )
-        )
-        self._s.flush()
+        self._resolver.add_xref(kind, entity_id, provider, provider_id)
 
 
 def _eastern_day(d: date) -> tuple[datetime, datetime]:

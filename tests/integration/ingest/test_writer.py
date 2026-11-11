@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
 from sharpline.db.models import (
@@ -591,3 +591,29 @@ def test_open_player_reviews_resolve_once_the_player_exists(db_session: Session)
     for review in db_session.scalars(select(EntityReview)):
         db_session.refresh(review)
         assert (review.status, review.resolved_entity_id) == ("resolved", tatum)
+
+
+def test_player_stats_lookups_are_batched_not_per_row(db_session: Session) -> None:
+    """A season of box scores goes over a public proxy: re-writing rows whose players and
+    games are already known takes a fixed number of statements, not a few per row."""
+    writer = _writer(db_session)
+    gsw_lac = _event_row("espn", "e1", "GS", "LAC", datetime(2025, 10, 29, 2, 30, tzinfo=UTC))
+    mil_nyk = _event_row("espn", "e2", "MIL", "NY", datetime(2025, 10, 28, 23, 30, tzinfo=UTC))
+    writer.events([gsw_lac, mil_nyk], _source(db_session, "espn", {"e": 1}))
+    payload = json.loads((FIXTURES / "nba_stats" / "league_game_log_players.json").read_text())
+    rows = parse_player_game_logs(payload)
+    src = _source(db_session, "nba_stats", payload)
+    assert writer.player_stats(rows, src).written == 4  # creates players and event xrefs
+
+    statements: list[str] = []
+    bind = db_session.connection()
+    listener = lambda *args: statements.append(args[2])  # noqa: E731
+    event.listen(bind, "before_cursor_execute", listener)
+    try:
+        fresh = _writer(db_session)  # no warm caches from the first write
+        assert fresh.player_stats(rows, src) == WriteStats(written=4, skipped=1, reviews=0)
+    finally:
+        event.remove(bind, "before_cursor_execute", listener)
+    # source, teams, the two xref primes, the newest stored games, one event lookup for
+    # the MIA-CHA game (no stored event, so no xref), one insert: 7, whatever the row count
+    assert len(statements) <= 7, "\n".join(statements)
