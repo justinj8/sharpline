@@ -15,7 +15,7 @@ ARGS="…"` works too.
 | Dev database at head | `uv run alembic upgrade head` (adds the ingest tables and seeds the 30 NBA teams). |
 | Odds API key | Get a free key at the-odds-api.com and put `ODDS_API_KEY=` in `.env` yourself. Never paste it anywhere else. Without it, odds actions are skipped (`no_api_key`) and only ESPN is captured. |
 | Bucket credentials | The `BUNDLE_*` variables in `.env`, piped from `railway bucket credentials` (in `.railway/`). If `BUNDLE_BUCKET` is empty, bundles stay in `var/bundles/`. |
-| History (players) | `uv run sharpline backfill nba-stats --seasons 2023-24 2024-25 2025-26`. The command is resumable: rerun it after a failure and finished dates are skipped. It also creates the players that prop and injury names resolve to. |
+| History (players) | `uv run sharpline backfill nba-stats --seasons 2023-24 2024-25 2025-26`. It also creates the players that prop and injury names resolve to. It costs no Odds API credits; most of its time goes to the paced ESPN scoreboards (about 30 minutes a season). Box scores commit one game day at a time, so after a failure (e.g. a dropped database connection) rerun the same command: stored scoreboards are skipped and the box scores are rewritten idempotently. |
 | Railway CLI | Logged in. `.railway/` is linked to project `sharpline`, environment `production`. |
 
 ## 1. Credit budget
