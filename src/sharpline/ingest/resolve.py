@@ -1,11 +1,14 @@
 """Cross-provider entity resolution: exact xref, unique name match, else review queue.
 
-The resolver never commits; it flushes as needed and callers own the transaction.
+The resolver never commits; it flushes as needed and callers own the transaction. It lives
+for one transaction and remembers the xrefs it has looked up (xrefs are never deleted, and
+every xref added during its life goes through `add_xref`), so a batch of rows naming the
+same players and games costs one lookup each, or one in all after `prime_xrefs`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -52,9 +55,26 @@ Resolution = Resolved | NeedsReview
 class EntityResolver:
     def __init__(self, session: Session) -> None:
         self._session = session
+        self._xrefs: dict[tuple[str, str, str], int | None] = {}
+
+    def prime_xrefs(self, provider: str, kind: str, provider_ids: Collection[str]) -> None:
+        """Look up the xrefs for `provider_ids` in one query; misses are remembered too."""
+        wanted = [pid for pid in set(provider_ids) if (provider, kind, pid) not in self._xrefs]
+        if not wanted:
+            return
+        found = self._session.execute(
+            select(EntityXref.provider_id, EntityXref.entity_id).where(
+                EntityXref.provider == provider,
+                EntityXref.entity_kind == kind,
+                EntityXref.provider_id.in_(wanted),
+            )
+        )
+        hits: dict[str, int] = {pid: eid for pid, eid in found}
+        for pid in wanted:
+            self._xrefs[(provider, kind, pid)] = hits.get(pid)
 
     def team(self, provider: str, provider_id: str) -> Resolution:
-        entity_id = self._xref(provider, "team", provider_id)
+        entity_id = self.xref(provider, "team", provider_id)
         if entity_id is not None:
             return Resolved(entity_id)
         review_id = self._upsert_review(
@@ -72,14 +92,14 @@ class EntityResolver:
         team_id: int | None,
     ) -> Resolution:
         """`team_id` restricts name matches to that team."""
-        entity_id = self._xref(provider, "player", provider_id)
+        entity_id = self.xref(provider, "player", provider_id)
         if entity_id is not None:
             return Resolved(entity_id)
 
         players = self._players(sport)
         exact = [p.id for p in _same_name(players, raw_name) if team_id in (None, p.team_id)]
         if len(exact) == 1:
-            self._add_xref("player", exact[0], provider, provider_id)
+            self.add_xref("player", exact[0], provider, provider_id)
             self._close_review(provider, provider_id, exact[0])
             return Resolved(exact[0])
 
@@ -87,7 +107,7 @@ class EntityResolver:
             player = Player(sport=sport, full_name=raw_name, team_id=team_id)
             self._session.add(player)
             self._session.flush()
-            self._add_xref("player", player.id, provider, provider_id)
+            self.add_xref("player", player.id, provider, provider_id)
             self._close_review(provider, provider_id, player.id)
             return Resolved(player.id)
 
@@ -106,7 +126,7 @@ class EntityResolver:
         hits = {
             entity_id
             for team_id in team_ids
-            if (entity_id := self._xref(provider, "player", team_scoped_key(raw_name, team_id)))
+            if (entity_id := self.xref(provider, "player", team_scoped_key(raw_name, team_id)))
             is not None
         }
         if len(hits) == 1:
@@ -120,8 +140,8 @@ class EntityResolver:
         if len(candidates) == 1:
             player = candidates[0]
             key = team_scoped_key(raw_name, player.team_id)
-            if self._xref(provider, "player", key) is None:
-                self._add_xref("player", player.id, provider, key)
+            if self.xref(provider, "player", key) is None:
+                self.add_xref("player", player.id, provider, key)
             self._close_review(provider, review_key, player.id)
             return Resolved(player.id)
 
@@ -136,8 +156,8 @@ class EntityResolver:
         if review.context.get("scope") == TEAM_SCOPE:
             team_id = self._session.get_one(Player, entity_id).team_id
             provider_id = team_scoped_key(review.raw_name, team_id)
-        if self._xref(review.provider, review.entity_kind, provider_id) is None:
-            self._add_xref(review.entity_kind, entity_id, review.provider, provider_id)
+        if self.xref(review.provider, review.entity_kind, provider_id) is None:
+            self.add_xref(review.entity_kind, entity_id, review.provider, provider_id)
         review.status = "resolved"
         review.resolved_entity_id = entity_id
         self._session.flush()
@@ -192,22 +212,29 @@ class EntityResolver:
         )
         return NeedsReview(review_id)
 
-    def _xref(self, provider: str, kind: str, provider_id: str) -> int | None:
-        return self._session.scalar(
+    def xref(self, provider: str, kind: str, provider_id: str) -> int | None:
+        key = (provider, kind, provider_id)
+        if key in self._xrefs:
+            return self._xrefs[key]
+        entity_id = self._session.scalar(
             select(EntityXref.entity_id).where(
                 EntityXref.provider == provider,
                 EntityXref.entity_kind == kind,
                 EntityXref.provider_id == provider_id,
             )
         )
+        if entity_id is not None:
+            self._xrefs[key] = entity_id
+        return entity_id
 
-    def _add_xref(self, kind: str, entity_id: int, provider: str, provider_id: str) -> None:
+    def add_xref(self, kind: str, entity_id: int, provider: str, provider_id: str) -> None:
         self._session.add(
             EntityXref(
                 entity_kind=kind, entity_id=entity_id, provider=provider, provider_id=provider_id
             )
         )
         self._session.flush()
+        self._xrefs[(provider, kind, provider_id)] = entity_id
 
     def _upsert_review(
         self,
