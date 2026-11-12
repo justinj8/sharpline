@@ -19,6 +19,7 @@ Transaction modes, decided by the session the caller passes in:
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -41,7 +42,7 @@ from sharpline.sources.nba_stats.client import NbaStatsClient
 from sharpline.sources.nba_stats.parse import parse_player_game_logs
 from sharpline.sources.odds_api.client import OddsFeed
 from sharpline.sources.odds_api.parse import parse_events, parse_odds
-from sharpline.sources.rows import EventRow
+from sharpline.sources.rows import EventRow, PlayerGameStatRow
 from sharpline.sports.nba.season import season_for
 
 CLOSING = "closing"
@@ -249,15 +250,19 @@ def backfill_season(
 
     Box scores attach only to stored events (R1), so the season's game log is fetched and
     recorded first, then the ESPN scoreboard of each of its game dates goes through the
-    results job (events, finals, sources), then the box scores are written. Resumable and
-    idempotent: a date whose scoreboard is already stored is skipped, and every unit
-    commits on its own, so a rerun after a failure picks up where it stopped. ESPN calls
-    are paced by the client's HTTP spacing.
+    results job (events, finals, sources), then the box scores are written one game day at
+    a time. Resumable and idempotent: a date whose scoreboard is already stored is skipped,
+    and every unit commits on its own (a scoreboard, a day of box scores), so a dropped
+    connection loses at most one day and a rerun picks up where it stopped. ESPN calls are
+    paced by the client's HTTP spacing.
     """
     fetched = nba.player_game_logs(season)
     with transaction(session):
         source_id = record_fetch(session, fetched, capture_run_id=capture_run_id)
-    days = sorted({row.game_date for row in parse_player_game_logs(fetched.payload)})
+    by_day: dict[date, list[PlayerGameStatRow]] = defaultdict(list)
+    for row in parse_player_game_logs(fetched.payload):
+        by_day[row.game_date].append(row)
+    days = sorted(by_day)
     done = skipped = 0
     for day in days:
         if scoreboard_recorded(session, day):
@@ -265,7 +270,8 @@ def backfill_season(
             continue
         ingest_results(session, espn, day, capture_run_id=capture_run_id)
         done += 1
-    with transaction(session):
-        writer = Writer(session, EntityResolver(session))
-        stats = PLAYER_STATS.write(writer, fetched.payload, source_id, fetched.fetched_at)
+    stats = WriteStats()
+    for day in days:  # oldest first: a player's team follows his newest stored game
+        with transaction(session):
+            stats += Writer(session, EntityResolver(session)).player_stats(by_day[day], source_id)
     return SeasonBackfill(season, len(days), done, skipped, stats)

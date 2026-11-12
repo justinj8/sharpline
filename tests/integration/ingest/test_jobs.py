@@ -26,6 +26,7 @@ from sharpline.db.models import (
     Team,
 )
 from sharpline.ingest.jobs import (
+    backfill_season,
     ingest_game_lines,
     ingest_injuries,
     ingest_player_stats,
@@ -34,7 +35,7 @@ from sharpline.ingest.jobs import (
     ingest_schedule,
 )
 from sharpline.ingest.reparse import reparse
-from sharpline.ingest.writer import WriteStats
+from sharpline.ingest.writer import Writer, WriteStats
 from sharpline.sources.espn.client import EspnClient
 from sharpline.sources.http import HttpClient
 from sharpline.sources.nba_stats.client import NbaStatsClient
@@ -268,3 +269,69 @@ def test_closing_fetched_after_a_tip_has_no_closing_snapshot_even_on_reparse(
     reparse(db_session, provider="odds_api")
     assert closing_events() == {"evt2"}
     assert _count(db_session, OddsSnapshot) == before
+
+
+def _game_log_over_two_days() -> dict[str, Any]:
+    """The fixture game log (2025-10-28) plus a copy of its rows two days later."""
+    payload = json.loads((FIXTURES / "nba_stats" / "league_game_log_players.json").read_text())
+    headers = payload["resultSets"][0]["headers"]
+    rows = payload["resultSets"][0]["rowSet"]
+    game_id, game_date = headers.index("GAME_ID"), headers.index("GAME_DATE")
+    later = []
+    for row in rows:
+        copy = list(row)
+        copy[game_id] = f"{row[game_id]}-b"
+        copy[game_date] = "2025-10-30"
+        later.append(copy)
+    payload["resultSets"][0]["rowSet"] = rows + later
+    return payload
+
+
+def test_backfill_commits_box_scores_per_game_day(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dropped connection mid-season loses one game day, not the season: each day's box
+    scores commit on their own, and a rerun completes the rest."""
+    gsw, lac = _team(db_session, "GSW"), _team(db_session, "LAC")
+    for tip in (
+        datetime(2025, 10, 29, 2, 30, tzinfo=UTC),
+        datetime(2025, 10, 31, 2, 30, tzinfo=UTC),
+    ):
+        db_session.add(
+            Event(sport="nba", season=2025, home_team_id=gsw, away_team_id=lac, commence_time=tip)
+        )
+    db_session.flush()
+    payload = _game_log_over_two_days()
+
+    class _Endpoint:
+        def get_dict(self) -> dict[str, Any]:
+            return payload
+
+    nba = NbaStatsClient(endpoint_factory=lambda **_kw: _Endpoint(), sleep=lambda _s: None)
+    base = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba"
+    no_games = HttpClient(
+        base,
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={"events": []})),
+        sleep=lambda _s: None,
+        max_retries=0,
+    )
+    espn = EspnClient(no_games, clock=lambda: T0)
+
+    real = Writer.player_stats
+    calls: list[int] = []
+
+    def drop_on_second_day(self: Writer, rows: Any, source_id: int) -> WriteStats:
+        calls.append(source_id)
+        if len(calls) == 2:
+            raise RuntimeError("server closed the connection unexpectedly")
+        return real(self, rows, source_id)
+
+    monkeypatch.setattr(Writer, "player_stats", drop_on_second_day)
+    with pytest.raises(RuntimeError, match="server closed"):
+        backfill_season(db_session, nba, espn, "2025-26")
+    assert _count(db_session, PlayerGameStat) == 2  # day one (GSW-LAC) survived
+
+    monkeypatch.setattr(Writer, "player_stats", real)
+    done = backfill_season(db_session, nba, espn, "2025-26")
+    assert done.stats == WriteStats(written=4, skipped=6, reviews=0)
+    assert _count(db_session, PlayerGameStat) == 4
